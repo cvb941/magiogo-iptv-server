@@ -6,7 +6,7 @@ idna==2.9
 itsdangerous==1.1.0
 Jinja2==2.11.2
 MarkupSafe==1.1.1
-python-xmltv==1.4.3
+-e hg+https://cvb941@bitbucket.org/jfunk/python-xmltv@bfe2da203254d4bc2e61edf2632d3afcb4452cd8#egg=python_xmltv
 requests==2.23.0
 urllib3==1.25.9
 Werkzeug==1.0.1

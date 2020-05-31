@@ -1,11 +1,13 @@
 # bude pocuvat na http na channelid a
 #  ten posunie do url z magiogo programme_streaminfo
+from pathlib import Path
+
 import xmltv
 from flask import Flask, redirect, send_file, send_from_directory
 from magiogo import *
 
 app = Flask(__name__)
-os.mkdir("public")
+Path("public").mkdir(exist_ok=True)
 
 
 @app.route('/<file_name>')
