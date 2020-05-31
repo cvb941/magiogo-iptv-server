@@ -30,6 +30,7 @@ channels = magio.channels()
 channel_ids = list(map(lambda c: c.id, channels))
 # streamInfo = magio.channel_stream_info(channels[0].id)
 with open("public/magioPlaylist.m3u8", "w", encoding="utf-8") as text_file:
+    text_file.write("#EXTM3U\n")
     for channel in channels:
         text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}" tvg-logo="{channel.logo}",{channel.name}\n')
         text_file.write(f"http://127.0.0.1:5000/channel/{channel.id}\n")
