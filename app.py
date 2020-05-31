@@ -5,6 +5,7 @@ from flask import Flask, redirect, send_file, send_from_directory
 from magiogo import *
 
 app = Flask(__name__)
+os.mkdir("public")
 
 
 @app.route('/<file_name>')
