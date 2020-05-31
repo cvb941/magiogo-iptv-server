@@ -1,0 +1,12 @@
+version: '3.3'
+services:
+    magiogo-iptv-server:
+        build: .
+        ports:
+            - '5678:5000'
+        environment:
+            - MAGIO_USERNAME=your_username
+            - MAGIO_PASSWORD=your_password
+            - MAGIO_SERVER_PUBLIC_URL="http://127.0.0.1:5000"
+        container_name: magiogo-iptv-server
+        image: magiogo-iptv-server
