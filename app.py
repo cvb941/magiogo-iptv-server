@@ -65,13 +65,17 @@ with open("public/magioGuide.xmltv", "wb") as guide_file:
                 'date': str(programme.year),
                 'desc': [(programme.description,
                           u'')],
-                'episode-num': [
-                    (f'{(programme.seasonNo or 1) - 1} . {(programme.episodeNo or 1) - 1} . 0', u'xmltv_ns')],
                 'icon': [{'src': programme.poster}, {'src': programme.thumbnail}],
                 'length': {'units': u'seconds', 'length': str(programme.duration)},
                 'start': programme.start_time.strftime("%Y%m%d%H%M%S"),
                 'stop': programme.end_time.strftime("%Y%m%d%H%M%S"),
                 'title': [(programme.title, u'')]}
+
+            # Define episode info only if provided
+            if programme.episodeNo is not None:
+                programme_dict['episode-num'] = [
+                    (f'{(programme.seasonNo or 1) - 1} . {(programme.episodeNo or 1) - 1} . 0', u'xmltv_ns')]
+
             writer.addProgramme(programme_dict)
 
     writer.write(guide_file, True)
