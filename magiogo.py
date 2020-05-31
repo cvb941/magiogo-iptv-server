@@ -208,7 +208,8 @@ class MagioGo(IPTVClient):
             offset = 0
             while fetch_more:
                 resp = self._get('https://skgo.magio.tv/v2/television/epg',
-                                 params={'filter': filter, 'limit': '20', 'offset': offset * 20, 'list': 'LIVE'},
+                                 params={'filter': filter, 'limit': '20', 'offset': offset * 20, 'list': 'LIVE',
+                                         'lang': 'EN'},
                                  headers=self._auth_headers())
 
                 fetch_more = len(resp['items']) == 20

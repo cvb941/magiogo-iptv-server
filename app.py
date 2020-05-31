@@ -56,13 +56,18 @@ with open("public/magioGuide.xmltv", "wb") as guide_file:
     for (channel_id, programmes) in epg.items():
         for programme in programmes:
             programme_dict = {
-                # 'category': [(u'Comedy', u'')],
+                'category': [(genre, u'en') for genre in programme.genres],
                 'channel': channel_id,
-                # 'credits': [{'producer': [u'Larry David'], 'actor': [u'Jerry Seinfeld']}],
+                'credits': {'producer': [producer for producer in programme.producers],
+                            'actor': [actor for actor in programme.actors],
+                            'writer': [writer for writer in programme.writers],
+                            'director': [director for director in programme.directors]},
                 'date': str(programme.year),
                 'desc': [(programme.description,
                           u'')],
-                # 'episode-num': [(u'7 . 1 . 1/1', u'xmltv_ns')],
+                'episode-num': [
+                    (f'{(programme.seasonNo or 1) - 1} . {(programme.episodeNo or 1) - 1} . 0', u'xmltv_ns')],
+                'icon': [{'src': programme.poster}, {'src': programme.thumbnail}],
                 'length': {'units': u'seconds', 'length': str(programme.duration)},
                 'start': programme.start_time.strftime("%Y%m%d%H%M%S"),
                 'stop': programme.end_time.strftime("%Y%m%d%H%M%S"),
