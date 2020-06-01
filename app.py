@@ -33,7 +33,7 @@ with open("public/magioPlaylist.m3u8", "w", encoding="utf-8") as text_file:
     text_file.write("#EXTM3U\n")
     for channel in channels:
         text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}" tvg-logo="{channel.logo}",{channel.name}\n')
-        text_file.write(f"${magio_iptv_server_public_url}/channel/{channel.id}\n")
+        text_file.write(f"{magio_iptv_server_public_url}/channel/{channel.id}\n")
 
 print("Generating XMLTV guide")
 date_from = datetime.datetime.now() - datetime.timedelta(days=0)

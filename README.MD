@@ -18,7 +18,7 @@ It should be the publicly (or privately) reachable URL from IPTV clients, to thi
 set MAGIO_USERNAME=your_username
 set MAGIO_PASSWORD=your_password
 # optional, default is http://127.0.0.1:5000
-set MAGIO_SERVER_PUBLIC_URL="http://127.0.0.1:5000"
+set MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
 flask run
 ```
 
@@ -26,7 +26,7 @@ flask run
 ### Docker
 ```shell script
 docker build -t magiogo-iptv-server .
-docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=your_password --env MAGIO_SERVER_PUBLIC_URL="http://127.0.0.1:5000" --name magiogo-iptv-server magiogo-iptv-server
+docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=your_password --env MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000 --name magiogo-iptv-server magiogo-iptv-server
 ```
 
 ### Docker Compose
@@ -40,7 +40,7 @@ services:
         environment:
             - MAGIO_USERNAME=your_username
             - MAGIO_PASSWORD=your_password
-            - MAGIO_SERVER_PUBLIC_URL="http://127.0.0.1:5000"
+            - MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
         container_name: magiogo-iptv-server
         image: magiogo-iptv-server
 ```
