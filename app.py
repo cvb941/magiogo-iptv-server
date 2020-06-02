@@ -1,5 +1,3 @@
-# bude pocuvat na http na channelid a
-#  ten posunie do url z magiogo programme_streaminfo
 import atexit
 from pathlib import Path
 
@@ -34,7 +32,7 @@ def generate_m3u8(channels):
 
 def generate_xmltv(channels):
     date_from = datetime.datetime.now() - datetime.timedelta(days=0)
-    date_to = datetime.datetime.now() + datetime.timedelta(days=1)
+    date_to = datetime.datetime.now() + datetime.timedelta(days=int(os.environ.get('MAGIO_GUIDE_DAYS', 7)))
     channel_ids = list(map(lambda c: c.id, channels))
     epg = magio.epg(channel_ids, date_from, date_to)
     with open("public/magioGuide.xmltv", "wb") as guide_file:
