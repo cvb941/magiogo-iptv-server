@@ -1,4 +1,5 @@
 import atexit
+import gzip
 from pathlib import Path
 
 import xmltv
@@ -19,6 +20,11 @@ def public_files(file_name):
 def channel_redirect(channel_id):
     stream_info = magio.channel_stream_info(channel_id)
     return redirect(stream_info.url, code=303)
+
+
+def gzip_file(file_path):
+    with open(file_path, 'rb') as src, gzip.open(f'{file_path}.gz', 'wb') as dst:
+        dst.writelines(src)
 
 
 def generate_m3u8(channels):
@@ -75,7 +81,8 @@ def generate_xmltv(channels):
                 writer.addProgramme(programme_dict)
 
         writer.write(guide_file, True)
-
+    # Gzip the guide file
+    gzip_file("public/magioGuide.xmltv")
 
 def refresh():
     channels = magio.channels()
