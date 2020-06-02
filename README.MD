@@ -53,6 +53,9 @@ services:
         image: magiogo-iptv-server
 ```
 
+## Season parsing
+season number is always none, trying to parse from title
+
 ## Credits
 Sorien
 https://github.com/Sorien/plugin.video.iptv.magiogo

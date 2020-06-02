@@ -1,7 +1,9 @@
 import atexit
 import gzip
+import re
 from pathlib import Path
 
+import roman as roman
 import xmltv
 from flask import Flask, redirect, send_file, send_from_directory
 from magiogo import *
@@ -25,6 +27,19 @@ def channel_redirect(channel_id):
 def gzip_file(file_path):
     with open(file_path, 'rb') as src, gzip.open(f'{file_path}.gz', 'wb') as dst:
         dst.writelines(src)
+
+
+def parse_season_number(show_title):
+    regex = r" M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})\.?$"
+    matches = re.search(regex, show_title)
+    if matches:
+        # Convert roman numeral to arabic
+        roman_num = matches.group()
+        # Remove leading space and trailing dot if present
+        roman_num = roman_num.strip(' .')
+        return roman.fromRoman(roman_num)
+    else:
+        return None
 
 
 def generate_m3u8(channels):
@@ -75,6 +90,10 @@ def generate_xmltv(channels):
 
                 # Define episode info only if provided
                 if programme.episodeNo is not None:
+                    # Since seasonNo seems to be always null, try parsing the season from the title (e.g. Kosti X. = 10)
+                    if programme.seasonNo is None:
+                        programme.seasonNo = parse_season_number(programme.title)
+
                     programme_dict['episode-num'] = [
                         (f'{(programme.seasonNo or 1) - 1} . {(programme.episodeNo or 1) - 1} . 0', u'xmltv_ns')]
 
@@ -83,6 +102,7 @@ def generate_xmltv(channels):
         writer.write(guide_file, True)
     # Gzip the guide file
     gzip_file("public/magioGuide.xmltv")
+
 
 def refresh():
     channels = magio.channels()
