@@ -60,6 +60,7 @@ services:
 
 ## Season parsing
 season number is always none, trying to parse from title
+this adds season info to xmltv, and unifies the show titles
 
 ## Credits
 Sorien

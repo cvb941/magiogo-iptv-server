@@ -46,17 +46,19 @@ def gzip_file(file_path):
 
 
 def parse_season_number(show_title):
-    """Tries to parse season number in roman numbers from show title using regex. Bones IX. -> 9"""
+    """Tries to parse season number in roman numbers from show title using regex. Bones IX. -> (Bones, 9)"""
     regex = r" M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})\.?$"
     matches = re.search(regex, show_title)
+
     if matches:
         roman_num = matches.group()
+        show_title_sans_season = show_title.replace(roman_num, "")
         # Remove leading space and trailing dot if present
         roman_num = roman_num.strip(' .')
         # Convert roman numeral to arabic
-        return roman.fromRoman(roman_num)
+        return show_title_sans_season, roman.fromRoman(roman_num)
     else:
-        return None
+        return show_title, None
 
 
 def generate_m3u8(channels):
@@ -109,7 +111,8 @@ def generate_xmltv(channels):
                 if programme.episodeNo is not None:
                     # Since seasonNo seems to be always null, try parsing the season from the title (e.g. Kosti X. = 10)
                     if programme.seasonNo is None:
-                        programme.seasonNo = parse_season_number(programme.title)
+                        (show_title_sans_season, programme.seasonNo) = parse_season_number(programme.title)
+                        programme_dict['title'] = [(show_title_sans_season, u'')]
 
                     programme_dict['episode-num'] = [
                         (f'{(programme.seasonNo or 1) - 1} . {(programme.episodeNo or 1) - 1} . 0', u'xmltv_ns')]
