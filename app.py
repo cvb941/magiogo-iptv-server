@@ -2,15 +2,25 @@ import atexit
 import gzip
 import re
 from pathlib import Path
+from time import strftime
 
 import roman as roman
 import xmltv
-from flask import Flask, redirect, send_file, send_from_directory
+from flask import Flask, redirect, send_file, send_from_directory, url_for, render_template, g
 from magiogo import *
 from apscheduler.schedulers.background import BlockingScheduler, BackgroundScheduler
 
 app = Flask(__name__)
+
+# Ensure public dir exists
 Path("public").mkdir(exist_ok=True)
+
+last_refresh = None
+
+
+@app.route('/')
+def index():
+    return render_template("index.html", last_refresh=last_refresh)
 
 
 @app.route('/<file_name>')
@@ -24,19 +34,26 @@ def channel_redirect(channel_id):
     return redirect(stream_info.url, code=303)
 
 
+@app.errorhandler(404)
+def page_not_found(e):
+    # Redirect all to index page
+    return redirect('/')
+
+
 def gzip_file(file_path):
     with open(file_path, 'rb') as src, gzip.open(f'{file_path}.gz', 'wb') as dst:
         dst.writelines(src)
 
 
 def parse_season_number(show_title):
+    """Tries to parse season number in roman numbers from show title using regex. Bones IX. -> 9"""
     regex = r" M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})\.?$"
     matches = re.search(regex, show_title)
     if matches:
-        # Convert roman numeral to arabic
         roman_num = matches.group()
         # Remove leading space and trailing dot if present
         roman_num = roman_num.strip(' .')
+        # Convert roman numeral to arabic
         return roman.fromRoman(roman_num)
     else:
         return None
@@ -114,6 +131,8 @@ def refresh():
     generate_xmltv(channels)
 
     print("Refreshing finished!")
+    global last_refresh
+    last_refresh = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 
 # Initial playlist and xmltv load

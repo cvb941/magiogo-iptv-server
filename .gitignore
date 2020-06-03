@@ -1,5 +1,7 @@
 storage
-public
+public/magioGuide.xmltv
+public/magioGuide.xmltv.gz
+public/magioPlaylist.m3u8
 src
 .vscode
 
