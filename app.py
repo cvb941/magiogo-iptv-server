@@ -113,6 +113,8 @@ def refresh():
     print("Generating XMLTV guide")
     generate_xmltv(channels)
 
+    print("Refreshing finished!")
+
 
 # Initial playlist and xmltv load
 print("Logging in to Magio Go TV")
@@ -121,6 +123,6 @@ refresh()
 
 # Load new playlist and xmltv everyday
 scheduler = BackgroundScheduler()
-scheduler.add_job(refresh, 'interval', hours=12)
+scheduler.add_job(refresh, 'interval', hours=int(os.environ.get('MAGIO_GUIDE_REFRESH_HOURS', 12)))
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
