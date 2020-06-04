@@ -37,11 +37,12 @@ files are generated from the Magio EPG.
  
 After launching the program, the generated files are available at:
 
-``
-MAGIO_SERVER_PUBLIC_URL/magioPlaylist.m3u8
-MAGIO_SERVER_PUBLIC_URL/magioGuide.xmltv
-MAGIO_SERVER_PUBLIC_URL/magioGuide.xmltv.gz
-``
+`MAGIO_SERVER_PUBLIC_URL/magioPlaylist.m3u8`
+
+`MAGIO_SERVER_PUBLIC_URL/magioGuide.xmltv`
+
+`MAGIO_SERVER_PUBLIC_URL/magioGuide.xmltv.gz`
+
 
 ## Setup instructions
 You can run this program either directly with Python 3
@@ -109,6 +110,8 @@ In order not to confuse DVR programs like Plex, the season numbering is then
 removed from the title. This way, recorded episodes from different seasons do not
 have different titles and are considered to be the same show by Plex.
 
+That being said, the episode numbering data from Magio is sometimes completely missing for
+some shows, which unfortunately causes DVRs like Plex to consider them as movies.
 ## Credits
 Sorien
 https://github.com/Sorien/plugin.video.iptv.magiogo
