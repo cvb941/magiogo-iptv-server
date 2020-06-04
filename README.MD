@@ -1,22 +1,60 @@
 # Magio GO IPTV Server
-- [ ] what
-- [ ] why
-- [ ] how
+This server application generates an .m3u8 playlist and XMLTV guide from the
+online TV Magio GO from Slovak Telekom.
 
-bude pocuvat na http na channelid a
-ten posunie do url z magiogo programme_streaminfo
+A valid subscription to the Magio GO service is required. The application authenticates with Magio
+servers with provided credentials. This counts as a device to the maximum device
+count limit.
+
+## Why was this created?
+
+Magio GO provides already provides client applications for Web, Mobile and TV platform.
+However, there may be devices that are not supported. This application makes it possible to watch Magio GO in an
+IPTV client of your choice, VLC, Plex, Jellyfin and any players that support the .m3u8 format.
+ 
+Plex includes a Live TV & DVR feature. It however doesn't support .m3u8 playlists directly.
+An M3U proxy application, such as [xTeVe](https://xteve.de/) is needed. It consumes multiple
+.m3u8 playlists and much more, while acting as a DVB tuner device for Plex.
+This way, you can watch and record online IPTV (and now also Magio GO) inside Plex.
+
+![](preview_plexDVR.jpg?raw=true)
+
+## How does it work
+This application builds on top of Sorien's work of [MagioGo Kodi addon](https://github.com/Sorien/plugin.video.iptv.magiogo),
+which integrates Magio GO in Kodi. It handles the authentication with Magio servers
+and retrieval of stream and EPG information.
+
+Magio GO IPTV Server works as a web server, listening for stream requests.
+When a request for a particular channel arrives, it retrieves the stream URL from
+Magio servers using the authenticated connection and redirects the client to this URL.
+
+Moreover, the app generates and hosts an .m3u8 playlist with the list of 
+channels gathered from Magio, together with URLs pointing to the web server as
+explained above.
+
+Along with the .m3u8 playlist, .xmltv and .xmltv gzipped XMLTV formatted 
+files are generated from the Magio EPG.
+ 
+After launching the program, the generated files are available at:
+
+``
+MAGIO_SERVER_PUBLIC_URL/magioPlaylist.m3u8
+MAGIO_SERVER_PUBLIC_URL/magioGuide.xmltv
+MAGIO_SERVER_PUBLIC_URL/magioGuide.xmltv.gz
+``
 
 ## Setup instructions
 You can run this program either directly with Python 3
 or on Docker.
 
-The credentials to Magio GO are passed through environment variables,
-so they need to be set depending on the platform accordingly.
+The credentials to Magio GO and other options are passed through environment variables,
+so they need to be set accordingly, depending on the platform.
 
 MAGIO_SERVER_PUBLIC_URL is used in the generated .m3u8 file in the stream URLs.
-It should be the publicly (or privately) reachable URL from IPTV clients, to this program.
+It should be a publicly (or privately) reachable URL from IPTV clients, to this program.
 
-MAGIO_GUIDE_DAYS signifies how many days from today should be loaded into the XMLTV guide.
+MAGIO_GUIDE_DAYS signifies how many days from today should be loaded
+into the XMLTV guide on refresh.
 
 MAGIO_GUIDE_REFRESH_HOURS is the number of hours between the guide and channel playlist updates.
 
@@ -30,6 +68,8 @@ set MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
 set MAGIO_GUIDE_DAYS=7
 # optional, default is 12
 set MAGIO_GUIDE_REFRESH_HOURS=12
+
+# run the application
 flask run
 ```
 
@@ -58,9 +98,16 @@ services:
         image: magiogo-iptv-server
 ```
 
-## Season parsing
-season number is always none, trying to parse from title
-this adds season info to xmltv, and unifies the show titles
+## Season parsing included
+EPG data for shows from Magio GO contains episode numbers, but for some reason, the season
+numbers are always null.
+
+Since in most cases the season number is included in the title (e.g. Bones IX.),
+we can parse the season number from there (e.g. Bones IX. -> 9).
+
+In order not to confuse DVR programs like Plex, the season numbering is then
+removed from the title. This way, recorded episodes from different seasons do not
+have different titles and are considered to be the same show by Plex.
 
 ## Credits
 Sorien
