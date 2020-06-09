@@ -71,7 +71,7 @@ set MAGIO_GUIDE_DAYS=7
 set MAGIO_GUIDE_REFRESH_HOURS=12
 
 # run the application
-flask run
+flask run --host=0.0.0.0
 ```
 
 
@@ -83,7 +83,7 @@ docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=
 
 ### Docker Compose
 ```yaml
-version: '3.3'
+version: '3'
 services:
     magiogo-iptv-server:
         build: .
