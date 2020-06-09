@@ -1,12 +1,12 @@
 FROM python:3.8-alpine
+RUN apk add git
 
 WORKDIR /app
 
 COPY . .
 
-RUN apk add mercurial
 RUN pip install -r requirements.txt
 
-ENTRYPOINT ["flask", "run", "--host=0.0.0.0"]
-
+ENV PYTHONUNBUFFERED=1
 EXPOSE 5000
+CMD ["flask", "run", "--host", "0.0.0.0"]

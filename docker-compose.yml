@@ -1,4 +1,4 @@
-version: '3.3'
+version: '3'
 services:
     magiogo-iptv-server:
         build: .
@@ -7,7 +7,7 @@ services:
         environment:
             - MAGIO_USERNAME=your_username
             - MAGIO_PASSWORD=your_password
-            - MAGIO_SERVER_PUBLIC_URL="http://127.0.0.1:5678"
+            - MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5678
             - MAGIO_GUIDE_DAYS=7
             - MAGIO_GUIDE_REFRESH_HOURS=12
         container_name: magiogo-iptv-server

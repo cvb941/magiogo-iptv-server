@@ -10,7 +10,7 @@ from flask import Flask, redirect, send_file, send_from_directory, url_for, rend
 from magiogo import *
 from apscheduler.schedulers.background import BlockingScheduler, BackgroundScheduler
 
-app = Flask(__name__)
+app = Flask(__name__, static_url_path="/", static_folder="public")
 
 # Ensure public dir exists
 Path("public").mkdir(exist_ok=True)
@@ -21,11 +21,6 @@ last_refresh = None
 @app.route('/')
 def index():
     return render_template("index.html", last_refresh=last_refresh)
-
-
-@app.route('/<file_name>')
-def public_files(file_name):
-    return send_from_directory("public", filename=file_name)
 
 
 @app.route('/channel/<channel_id>')
