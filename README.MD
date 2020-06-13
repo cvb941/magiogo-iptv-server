@@ -77,8 +77,7 @@ flask run --host=0.0.0.0
 
 ### Docker
 ```shell script
-docker build -t magiogo-iptv-server .
-docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=your_password --env MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000 --env MAGIO_GUIDE_DAYS=7 --env MAGIO_GUIDE_REFRESH_HOURS=12 --name magiogo-iptv-server magiogo-iptv-server
+docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=your_password --env MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000 --env MAGIO_GUIDE_DAYS=7 --env MAGIO_GUIDE_REFRESH_HOURS=12 --name magiogo-iptv-server cvb941/magiogo-iptv-server
 ```
 
 ### Docker Compose
@@ -86,7 +85,7 @@ docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=
 version: '3'
 services:
     magiogo-iptv-server:
-        build: .
+        image: cvb941/magiogo-iptv-server
         ports:
             - '5000:5000'
         environment:
@@ -96,7 +95,6 @@ services:
             - MAGIO_GUIDE_DAYS=7
             - MAGIO_GUIDE_REFRESH_HOURS=12
         container_name: magiogo-iptv-server
-        image: magiogo-iptv-server
 ```
 
 ## Season parsing included

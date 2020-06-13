@@ -1,7 +1,7 @@
 version: '3'
 services:
     magiogo-iptv-server:
-        build: .
+        image: cvb941/magiogo-iptv-server
         ports:
             - '5678:5000'
         environment:
@@ -11,4 +11,3 @@ services:
             - MAGIO_GUIDE_DAYS=7
             - MAGIO_GUIDE_REFRESH_HOURS=12
         container_name: magiogo-iptv-server
-        image: magiogo-iptv-server
