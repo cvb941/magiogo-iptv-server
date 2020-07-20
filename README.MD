@@ -37,11 +37,11 @@ files are generated from the Magio EPG.
  
 After launching the program, the generated files are available at:
 
-`MAGIO_SERVER_PUBLIC_URL/magioPlaylist.m3u8`
+`127.0.0.1:5000/magioPlaylist.m3u8`
 
-`MAGIO_SERVER_PUBLIC_URL/magioGuide.xmltv`
+`127.0.0.1:5000/magioGuide.xmltv`
 
-`MAGIO_SERVER_PUBLIC_URL/magioGuide.xmltv.gz`
+`127.0.0.1:5000/magioGuide.xmltv.gz`
 
 
 ## Setup instructions
@@ -51,16 +51,20 @@ or on Docker.
 The credentials to Magio GO and other options are passed through environment variables,
 so they need to be set accordingly, depending on the platform.
 
-MAGIO_SERVER_PUBLIC_URL is used in the generated .m3u8 file in the stream URLs.
+**MAGIO_SERVER_PUBLIC_URL** is used in the generated .m3u8 file in the stream URLs.
 It should be a publicly (or privately) reachable URL from IPTV clients, to this program.
 
-MAGIO_GUIDE_DAYS signifies how many days from today should be loaded
+**MAGIO_GUIDE_DAYS** signifies how many days from today should be loaded
 into the XMLTV guide on refresh.
 
-MAGIO_GUIDE_REFRESH_HOURS is the number of hours between the guide and channel playlist updates.
+**MAGIO_GUIDE_REFRESH_HOURS** is the number of hours between the guide and channel playlist updates.
 
 ### Python
 ```shell script
+# install dependencies
+pip install -r requirements.txt
+
+# set options
 set MAGIO_USERNAME=your_username
 set MAGIO_PASSWORD=your_password
 # optional, default is http://127.0.0.1:5000
