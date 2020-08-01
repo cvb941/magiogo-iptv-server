@@ -59,6 +59,8 @@ into the XMLTV guide on refresh.
 
 **MAGIO_GUIDE_REFRESH_HOURS** is the number of hours between the guide and channel playlist updates.
 
+**MAGIO_QUALITY** determines the quality of the video stream. Values can be LOW/MEDIUM/HIGH/EXTRA.
+
 ### Python
 ```shell script
 # install dependencies
@@ -73,6 +75,8 @@ set MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
 set MAGIO_GUIDE_DAYS=7
 # optional, default is 12
 set MAGIO_GUIDE_REFRESH_HOURS=12
+# optional, default is HIGH
+set MAGIO_QUALITY=HIGH
 
 # run the application
 flask run --host=0.0.0.0
@@ -98,6 +102,7 @@ services:
             - MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
             - MAGIO_GUIDE_DAYS=7
             - MAGIO_GUIDE_REFRESH_HOURS=12
+            - MAGIO_QUALITY=HIGH
         container_name: magiogo-iptv-server
 ```
 

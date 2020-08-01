@@ -133,9 +133,15 @@ def refresh():
     last_refresh = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 
+# Quality config
+qualityString = os.environ.get('MAGIO_QUALITY', "HIGH")
+qualityMapping = {"LOW": MagioQuality.low, "MEDIUM": MagioQuality.medium, "HIGH": MagioQuality.high, "EXTRA": MagioQuality.extra}
+quality = qualityMapping[qualityString]
+print(f"Stream quality configured to: {qualityString} ({quality})")
+
 # Initial playlist and xmltv load
 print("Logging in to Magio Go TV")
-magio = MagioGo(os.environ.get('MAGIO_USERNAME'), os.environ.get('MAGIO_PASSWORD'), MagioQuality.extra)
+magio = MagioGo(os.environ.get('MAGIO_USERNAME'), os.environ.get('MAGIO_PASSWORD'), quality)
 refresh()
 
 # Load new playlist and xmltv everyday

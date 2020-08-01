@@ -3,11 +3,12 @@ services:
     magiogo-iptv-server:
         image: cvb941/magiogo-iptv-server
         ports:
-            - '5678:5000'
+            - '5000:5000'
         environment:
             - MAGIO_USERNAME=your_username
             - MAGIO_PASSWORD=your_password
-            - MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5678
+            - MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
             - MAGIO_GUIDE_DAYS=7
             - MAGIO_GUIDE_REFRESH_HOURS=12
+            - MAGIO_QUALITY=HIGH
         container_name: magiogo-iptv-server
