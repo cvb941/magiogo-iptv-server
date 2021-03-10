@@ -1,14 +1,13 @@
 import atexit
 import gzip
-import re
 from pathlib import Path
-from time import strftime
 
-import roman as roman
 import xmltv
-from flask import Flask, redirect, send_file, send_from_directory, url_for, render_template, g
+from apscheduler.schedulers.background import BackgroundScheduler
+from flask import Flask, redirect, render_template
+
 from magiogo import *
-from apscheduler.schedulers.background import BlockingScheduler, BackgroundScheduler
+from parse_season_number import parse_season_number
 
 app = Flask(__name__, static_url_path="/", static_folder="public")
 
@@ -38,22 +37,6 @@ def page_not_found(e):
 def gzip_file(file_path):
     with open(file_path, 'rb') as src, gzip.open(f'{file_path}.gz', 'wb') as dst:
         dst.writelines(src)
-
-
-def parse_season_number(show_title):
-    """Tries to parse season number in roman numbers from show title using regex. Bones IX. -> (Bones, 9)"""
-    regex = r" M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})\.?$"
-    matches = re.search(regex, show_title)
-
-    if matches:
-        roman_num = matches.group()
-        show_title_sans_season = show_title.replace(roman_num, "")
-        # Remove leading space and trailing dot if present
-        roman_num = roman_num.strip(' .')
-        # Convert roman numeral to arabic
-        return show_title_sans_season, roman.fromRoman(roman_num)
-    else:
-        return show_title, None
 
 
 def generate_m3u8(channels):
