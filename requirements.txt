@@ -13,5 +13,5 @@ requests==2.23.0
 roman==3.2
 six==1.15.0
 tzlocal==2.1
-urllib3==1.25.9
+urllib3==1.26.5
 Werkzeug==1.0.1
