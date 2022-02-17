@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from __future__ import unicode_literals
+
 import json
 import os
 from datetime import datetime
@@ -39,7 +39,7 @@ class WidevineLicenceKey(Base):
         self.response = ''
 
     def to_string(self):
-        return '%s|%s|%s|%s' % (self.license_server_url, '&'.join(['%s=%s' % (k, v) for (k, v) in self.headers.items()]),
+        return '%s|%s|%s|%s' % (self.license_server_url, '&'.join(['%s=%s' % (k, v) for (k, v) in list(self.headers.items())]),
                                 self.post_data, self.response)
 
 

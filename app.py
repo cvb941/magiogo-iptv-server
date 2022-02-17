@@ -124,7 +124,7 @@ print(f"Stream quality configured to: {qualityString} ({quality})")
 
 # Initial playlist and xmltv load
 print("Logging in to Magio Go TV")
-magio = MagioGo(os.environ.get('MAGIO_USERNAME'), os.environ.get('MAGIO_PASSWORD'), quality)
+magio = MagioGo("./storage", os.environ.get('MAGIO_USERNAME'), os.environ.get('MAGIO_PASSWORD'), quality)
 refresh()
 
 # Load new playlist and xmltv everyday
