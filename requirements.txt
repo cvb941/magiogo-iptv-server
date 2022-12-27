@@ -15,6 +15,6 @@ itsdangerous==2.0.1
 certifi==2022.12.7
 chardet==4.0.0
 idna==3.3
-setuptools==60.9.2
+setuptools==65.5.1
 zipp==3.7.0
 git+https://github.com/mforkel/python-xmltv.git#egg=python_xmltv
