@@ -159,14 +159,15 @@ class MagioGo(IPTVClient):
 
         return ret
 
-    def channel_stream_info(self, channel_id, programme_id=None):
+    def channel_stream_info(self, channel_id, programme_id=None, quality_override=None):
         self._login()
+        quality = quality_override or self._quality
         resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
                          params={'service': 'TIMESHIFT',
                                  'name': self._device,
                                  'devtype': 'OTT_STB',
                                  'id': channel_id,
-                                 'prof': self._quality,
+                                 'prof': quality,
                                  'ecid': '',
                                  'drm': 'verimatrix'},
                          headers=self._auth_headers())
@@ -174,6 +175,14 @@ class MagioGo(IPTVClient):
         si.url = resp['url']
         si.manifest_type = 'mpd' if si.url.find('.mpd') > 0 else 'm3u'
         si.user_agent = UA
+
+        # Some channels, such as Filmbox Europe HD, seem to have only p0, p1, p2 qualities
+        # Check if url is valid (does not return 404), and fallback to p2 quality
+        if quality != MagioQuality.medium:
+            r = requests.get(si.url)
+            if r.status_code == 404:
+                return self.channel_stream_info(channel_id, programme_id, MagioQuality.medium)
+
         return si
 
     def programme_stream_info(self, programme_id):
