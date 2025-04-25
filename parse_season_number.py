@@ -12,11 +12,15 @@ def parse_season_number(show_title):
     matches = re.search(regex, show_title)
 
     if matches:
-        roman_num = matches.group()
-        show_title_sans_season = show_title.replace(roman_num, "")
-        # Remove leading space and trailing dot if present
-        roman_num = roman_num.strip(' .')
+        roman_num = matches.group().strip(' .')
+        if not roman_num:  # If the matched group is empty after stripping
+            return show_title, None
+            
+        show_title_sans_season = show_title.replace(matches.group(), "")
         # Convert roman numeral to arabic
-        return show_title_sans_season, roman.fromRoman(roman_num)
+        try:
+            return show_title_sans_season, roman.fromRoman(roman_num)
+        except roman.InvalidRomanNumeralError:
+            return show_title, None
     else:
         return show_title, None

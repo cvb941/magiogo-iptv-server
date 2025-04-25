@@ -163,7 +163,7 @@ class MagioGo(IPTVClient):
         self._login()
         quality = quality_override or self._quality
         resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
-                         params={'service': 'TIMESHIFT',
+                         params={'service': 'LIVE',
                                  'name': self._device,
                                  'devtype': 'OTT_STB',
                                  'id': channel_id,
