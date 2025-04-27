@@ -2,6 +2,7 @@ import datetime
 import random
 import time
 import requests
+import json
 
 try:
     from typing import List
@@ -14,7 +15,7 @@ from requests.adapters import HTTPAdapter
 from client import *
 import datetime
 
-UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0'
 
 
 class MagioGoException(Exception):
@@ -63,28 +64,41 @@ class MagioGo(IPTVClient):
         self._password = password
         self._quality = quality
         self._device = 'Magio IPTV Server'
+        self._deviceType = 'OTT_MAC'
         self._data = MagioGoSessionData()
         super().__init__(storage_dir, '%s.session' % self._user_name)
 
     def _check_response(self, resp):
-        if resp['success']:
+        # SUCCESS path: extract & store tokens if present, then return
+        if resp.get('success', False):
             if 'token' in resp:
-                self._data.access_token = resp['token']['accessToken']
+                self._data.access_token  = resp['token']['accessToken']
                 self._data.refresh_token = resp['token']['refreshToken']
-                self._data.expires_in = resp['token']['expiresIn']
-                self._data.type = resp['token']['type']
+                self._data.expires_in    = resp['token']['expiresIn']
+                self._data.type          = resp['token']['type']
                 self._store_session(self._data)
-        else:
-            self._store_session(MagioGoSessionData())
-            error_code = resp['errorCode']
-            if error_code == 'INVALID_CREDENTIALS':
-                raise UserInvalidException()
-            raise MagioGoException(resp['errorCode'], resp['errorMessage'])
+            else:
+                # e.g. the /init call returns success with no token
+                self._store_session(MagioGoSessionData())
+            return
+
+        # ERROR path: only executed if success==False
+        error_code = resp.get('errorCode')
+        if error_code == 'INVALID_CREDENTIALS':
+            raise UserInvalidException()
+        raise MagioGoException(error_code, resp.get('errorMessage'))
 
     def _auth_headers(self):
-        return {'Authorization': self._data.type + ' ' + self._data.access_token,
-                'Origin': 'https://www.magiogo.sk', 'Pragma': 'no-cache', 'Referer': 'https://www.magiogo.sk/',
-                'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Site': 'cross-site', 'User-Agent': UA}
+        return {
+            'Authorization': f"{self._data.type} {self._data.access_token}",
+            'X-ClientId': '-1',
+            'Origin': 'https://www.magiogo.sk',
+            'Pragma': 'no-cache',
+            'Referer': 'https://www.magiogo.sk/',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'cross-site',
+            'User-Agent': UA,
+        }
 
     @staticmethod
     def _request():
@@ -110,31 +124,58 @@ class MagioGo(IPTVClient):
             raise NetConnectionError(str(err))
 
     def _login(self):
-        if (self._user_name == '') or (self._password == ''):
+        # 0) ensure credentials are configured
+        if not self._user_name or not self._password:
             raise UserNotDefinedException
 
+        # 1) try to restore a saved session
         self._load_session(self._data)
 
+        # 2) if there’s no access token yet, do init + login
         if not self._data.access_token:
-            self._post('https://skgo.magio.tv/v2/auth/init',
-                       params={'dsid': 'Netscape.' + str(int(time.time())) + '.' + str(random.random()),
-                               'deviceName': self._device,
-                               'deviceType': 'OTT_STB',
-                               'osVersion': '0.0.0',
-                               'appVersion': '0.0.0',
-                               'language': 'SK'},
-                       headers={'Origin': 'https://www.magiogo.sk', 'Pragma': 'no-cache',
-                                'Referer': 'https://www.magiogo.sk/', 'User-Agent': UA,
-                                'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Site': 'cross-site'})
+            # 2a) INIT: register this “device”
+            self._post(
+                'https://skgo.magio.tv/v2/auth/init',
+                params={
+                    'dsid': f"Netscape.{int(time.time())}.{random.random()}",
+                    'deviceName': self._device,
+                    'deviceType': 'OTT_STB',
+                    'osVersion': '0.0.0',
+                    'appVersion': '0.0.0',
+                    'language': 'SK'
+                },
+                headers={
+                    'X-ClientId': '-1',
+                    'Origin': 'https://www.magiogo.sk',
+                    'Pragma': 'no-cache',
+                    'Referer': 'https://www.magiogo.sk/',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'cross-site',
+                    'User-Agent': UA,
+                }
+            )
 
-            self._post('https://skgo.magio.tv/v2/auth/login',
-                       json={'loginOrNickname': self._user_name, 'password': self._password},
-                       headers=self._auth_headers())
+            # 2b) LOGIN: compact JSON body (no spaces) via data=
+            login_body = json.dumps(
+                {'loginOrNickname': self._user_name, 'password': self._password},
+                separators=(',',':')
+            )
+            self._post(
+                'https://skgo.magio.tv/v2/auth/login',
+                data=login_body,
+                headers={
+                    **self._auth_headers(),        # includes Authorization & X-ClientId
+                    'Content-Type': 'application/json',
+                }
+            )
 
+        # 3) if token expired, refresh it
         if self._data.refresh_token and self._data.expires_in < int(time.time() * 1000):
-            self._post('https://skgo.magio.tv/v2/auth/tokens',
-                       json={'refreshToken': self._data.refresh_token},
-                       headers=self._auth_headers())
+            self._post(
+                'https://skgo.magio.tv/v2/auth/tokens',
+                json={'refreshToken': self._data.refresh_token},
+                headers=self._auth_headers()
+            )
 
     def channels(self, progress=dummy_progress):
         self._login()
