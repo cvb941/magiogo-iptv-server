@@ -13,8 +13,6 @@ COPY . .
 RUN addgroup -S app && adduser -S app -G app \
     && chown -R app:app /app
 
-USER app
-
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 EXPOSE 5000
