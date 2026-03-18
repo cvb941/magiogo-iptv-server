@@ -140,10 +140,34 @@ class IPTVClient(object):
     def _store_session(self, data):
         if not os.path.exists(self._storage_path):
             os.makedirs(self._storage_path)
-        with open(self._storage_file, 'w') as f:
+
+        tmp_file = f"{self._storage_file}.tmp"
+        with open(tmp_file, 'w', encoding='utf-8') as f:
             json.dump(data.__dict__, f)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp_file, self._storage_file)
 
     def _load_session(self, data):
-        if os.path.exists(self._storage_file):
-            with open(self._storage_file, 'r') as f:
-                data.__dict__ = json.load(f)
+        if not os.path.exists(self._storage_file):
+            return
+
+        try:
+            with open(self._storage_file, 'r', encoding='utf-8') as f:
+                raw = f.read().strip()
+
+            if not raw:
+                os.remove(self._storage_file)
+                return
+
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                data.__dict__.update(loaded)
+            else:
+                os.remove(self._storage_file)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            try:
+                os.remove(self._storage_file)
+            except OSError:
+                pass
