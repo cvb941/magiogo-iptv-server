@@ -64,7 +64,7 @@ class MagioGo(IPTVClient):
         self._password = password
         self._quality = quality
         self._device = 'Magio IPTV Server'
-        self._deviceType = 'OTT_MAC'
+        self._deviceType = 'OTT_STB'
         self._data = MagioGoSessionData()
         super().__init__(storage_dir, '%s.session' % self._user_name)
 
@@ -77,9 +77,6 @@ class MagioGo(IPTVClient):
                 self._data.expires_in    = resp['token']['expiresIn']
                 self._data.type          = resp['token']['type']
                 self._store_session(self._data)
-            else:
-                # e.g. the /init call returns success with no token
-                self._store_session(MagioGoSessionData())
             return
 
         # ERROR path: only executed if success==False
@@ -123,6 +120,42 @@ class MagioGo(IPTVClient):
         except requests.exceptions.ConnectionError as err:
             raise NetConnectionError(str(err))
 
+    def _init_and_login(self):
+        # INIT: register this "device"
+        self._post(
+            'https://skgo.magio.tv/v2/auth/init',
+                params={
+                    'dsid': f"Netscape.{int(time.time())}.{random.random()}",
+                    'deviceName': self._device,
+                    'deviceType': self._deviceType,
+                    'osVersion': '0.0.0',
+                    'appVersion': '0.0.0',
+                    'language': 'SK'
+            },
+            headers={
+                'X-ClientId': '-1',
+                'Origin': 'https://www.magiogo.sk',
+                'Pragma': 'no-cache',
+                'Referer': 'https://www.magiogo.sk/',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'cross-site',
+                'User-Agent': UA,
+            }
+        )
+
+        login_body = json.dumps(
+            {'loginOrNickname': self._user_name, 'password': self._password},
+            separators=(',', ':')
+        )
+        self._post(
+            'https://skgo.magio.tv/v2/auth/login',
+            data=login_body,
+            headers={
+                **self._auth_headers(),
+                'Content-Type': 'application/json',
+            }
+        )
+
     def _login(self):
         # 0) ensure credentials are configured
         if not self._user_name or not self._password:
@@ -133,49 +166,21 @@ class MagioGo(IPTVClient):
 
         # 2) if there’s no access token yet, do init + login
         if not self._data.access_token:
-            # 2a) INIT: register this “device”
-            self._post(
-                'https://skgo.magio.tv/v2/auth/init',
-                params={
-                    'dsid': f"Netscape.{int(time.time())}.{random.random()}",
-                    'deviceName': self._device,
-                    'deviceType': 'OTT_STB',
-                    'osVersion': '0.0.0',
-                    'appVersion': '0.0.0',
-                    'language': 'SK'
-                },
-                headers={
-                    'X-ClientId': '-1',
-                    'Origin': 'https://www.magiogo.sk',
-                    'Pragma': 'no-cache',
-                    'Referer': 'https://www.magiogo.sk/',
-                    'Sec-Fetch-Mode': 'cors',
-                    'Sec-Fetch-Site': 'cross-site',
-                    'User-Agent': UA,
-                }
-            )
-
-            # 2b) LOGIN: compact JSON body (no spaces) via data=
-            login_body = json.dumps(
-                {'loginOrNickname': self._user_name, 'password': self._password},
-                separators=(',',':')
-            )
-            self._post(
-                'https://skgo.magio.tv/v2/auth/login',
-                data=login_body,
-                headers={
-                    **self._auth_headers(),        # includes Authorization & X-ClientId
-                    'Content-Type': 'application/json',
-                }
-            )
+            self._init_and_login()
 
         # 3) if token expired, refresh it
         if self._data.refresh_token and self._data.expires_in < int(time.time() * 1000):
-            self._post(
-                'https://skgo.magio.tv/v2/auth/tokens',
-                json={'refreshToken': self._data.refresh_token},
-                headers=self._auth_headers()
-            )
+            try:
+                self._post(
+                    'https://skgo.magio.tv/v2/auth/tokens',
+                    json={'refreshToken': self._data.refresh_token},
+                    headers=self._auth_headers()
+                )
+            except MagioGoException:
+                # Stored refresh token can become invalid; force full re-auth.
+                self._data = MagioGoSessionData()
+                self._store_session(self._data)
+                self._init_and_login()
 
     def channels(self, progress=dummy_progress):
         self._login()
@@ -206,7 +211,7 @@ class MagioGo(IPTVClient):
         resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
                          params={'service': 'LIVE',
                                  'name': self._device,
-                                 'devtype': 'OTT_STB',
+                                 'devtype': self._deviceType,
                                  'id': channel_id,
                                  'prof': quality,
                                  'ecid': '',
@@ -231,7 +236,7 @@ class MagioGo(IPTVClient):
         resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
                          params={'service': 'ARCHIVE',
                                  'name': self._device,
-                                 'devtype': 'OTT_STB',
+                                 'devtype': self._deviceType,
                                  'id': programme_id,
                                  'prof': self._quality,
                                  'ecid': '',

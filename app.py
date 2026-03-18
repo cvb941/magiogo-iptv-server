@@ -1,10 +1,14 @@
 import atexit
+import datetime
 import gzip
+import os
+import sys
 from pathlib import Path
 
 import xmltv
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, redirect, render_template
+from tqdm import tqdm
 
 from magiogo import *
 from parse_season_number import parse_season_number
@@ -43,7 +47,7 @@ def generate_m3u8(channels):
     magio_iptv_server_public_url = os.environ.get('MAGIO_SERVER_PUBLIC_URL', "http://127.0.0.1:5000")
     with open("public/magioPlaylist.m3u8", "w", encoding="utf-8") as text_file:
         text_file.write("#EXTM3U\n")
-        for channel in channels:
+        for channel in tqdm(channels, total=len(channels), desc="Generating .m3u8 playlist", unit="ch", file=sys.stdout):
             text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}" tvg-logo="{channel.logo}",{channel.name}\n')
             text_file.write(f"{magio_iptv_server_public_url}/channel/{channel.id}\n")
 
@@ -52,7 +56,18 @@ def generate_xmltv(channels):
     date_from = datetime.datetime.now() - datetime.timedelta(days=0)
     date_to = datetime.datetime.now() + datetime.timedelta(days=int(os.environ.get('MAGIO_GUIDE_DAYS', 7)))
     channel_ids = list(map(lambda c: c.id, channels))
-    epg = magio.epg(channel_ids, date_from, date_to)
+    with tqdm(total=100, desc="Generating XMLTV guide", unit="pct", file=sys.stdout) as bar:
+        last_progress = {'value': 0}
+
+        def epg_progress(percent):
+            percent = max(0, min(100, int(percent)))
+            if percent <= last_progress['value']:
+                return
+            bar.update(percent - last_progress['value'])
+            last_progress['value'] = percent
+
+        epg = magio.epg(channel_ids, date_from, date_to, progress=epg_progress)
+        epg_progress(100)
     with open("public/magioGuide.xmltv", "wb") as guide_file:
         writer = xmltv.Writer(
             date=datetime.datetime.now().strftime("%Y%m%d%H%M%S"),
@@ -105,10 +120,8 @@ def generate_xmltv(channels):
 def refresh():
     channels = magio.channels()
 
-    print("Generating .m3u8 playlist")
     generate_m3u8(channels)
 
-    print("Generating XMLTV guide")
     generate_xmltv(channels)
 
     print("Refreshing finished!")
@@ -123,12 +136,18 @@ quality = qualityMapping[qualityString]
 print(f"Stream quality configured to: {qualityString} ({quality})")
 
 # Initial playlist and xmltv load
+magio_username = os.environ.get('MAGIO_USERNAME')
+magio_password = os.environ.get('MAGIO_PASSWORD')
+missing_credentials = [name for name, value in (('MAGIO_USERNAME', magio_username), ('MAGIO_PASSWORD', magio_password)) if not value]
+if missing_credentials:
+    raise RuntimeError(f"Missing required environment variable(s): {', '.join(missing_credentials)}")
+
 print("Logging in to Magio Go TV")
-magio = MagioGo("./storage", os.environ.get('MAGIO_USERNAME'), os.environ.get('MAGIO_PASSWORD'), quality)
+magio = MagioGo("./storage", magio_username, magio_password, quality)
 refresh()
 
 # Load new playlist and xmltv everyday
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(refresh, 'interval', hours=int(os.environ.get('MAGIO_GUIDE_REFRESH_HOURS', 12)))
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
