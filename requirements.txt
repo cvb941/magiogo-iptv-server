@@ -6,7 +6,7 @@ six==1.16.0
 tzlocal<3.0
 urllib3==1.26.8
 requests==2.31.0
-pip==22.0.3
+pip==23.3
 certifi==2023.7.22
 chardet==4.0.0
 idna==3.3
