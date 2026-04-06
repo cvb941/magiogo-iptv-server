@@ -11,4 +11,6 @@ services:
             - MAGIO_GUIDE_DAYS=7
             - MAGIO_GUIDE_REFRESH_HOURS=12
             - MAGIO_QUALITY=HIGH
+            - MAGIO_DEVICE_TYPE=OTT_STB
+            - MAGIO_DEVICE_NAME=Magio IPTV Server
         container_name: magiogo-iptv-server

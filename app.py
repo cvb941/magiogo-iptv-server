@@ -134,6 +134,10 @@ qualityString = os.environ.get('MAGIO_QUALITY', "HIGH")
 qualityMapping = {"LOW": MagioQuality.low, "MEDIUM": MagioQuality.medium, "HIGH": MagioQuality.high, "EXTRA": MagioQuality.extra}
 quality = qualityMapping[qualityString]
 print(f"Stream quality configured to: {qualityString} ({quality})")
+device_type = os.environ.get('MAGIO_DEVICE_TYPE', "OTT_STB")
+print(f"Device type configured to: {device_type}")
+device_name = os.environ.get('MAGIO_DEVICE_NAME', "Magio IPTV Server")
+print(f"Device name configured to: {device_name}")
 
 # Initial playlist and xmltv load
 magio_username = os.environ.get('MAGIO_USERNAME')
@@ -143,7 +147,7 @@ if missing_credentials:
     raise RuntimeError(f"Missing required environment variable(s): {', '.join(missing_credentials)}")
 
 print("Logging in to Magio Go TV")
-magio = MagioGo("./storage", magio_username, magio_password, quality)
+magio = MagioGo("./storage", magio_username, magio_password, quality, device_type, device_name)
 refresh()
 
 # Load new playlist and xmltv everyday

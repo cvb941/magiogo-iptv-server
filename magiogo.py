@@ -59,12 +59,13 @@ class MagioQuality:
 
 class MagioGo(IPTVClient):
 
-    def __init__(self, storage_dir, user_name, password, quality=MagioQuality.medium):
+    def __init__(self, storage_dir, user_name, password, quality=MagioQuality.medium, device_type='OTT_STB', device_name='Magio IPTV Server'):
         self._user_name = user_name
         self._password = password
         self._quality = quality
-        self._device = 'Magio IPTV Server'
-        self._deviceType = 'OTT_STB'
+        self._device = device_name
+        self._deviceType = device_type
+        self._appVersion = '4.1.1' if self._deviceType == 'OTT_ANDROID' else '0.0.0'
         self._data = MagioGoSessionData()
         super().__init__(storage_dir, '%s.session' % self._user_name)
 
@@ -129,7 +130,7 @@ class MagioGo(IPTVClient):
                     'deviceName': self._device,
                     'deviceType': self._deviceType,
                     'osVersion': '0.0.0',
-                    'appVersion': '0.0.0',
+                    'appVersion': self._appVersion,
                     'language': 'SK'
             },
             headers={
