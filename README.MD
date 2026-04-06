@@ -61,6 +61,11 @@ into the XMLTV guide on refresh.
 
 **MAGIO_QUALITY** determines the quality of the video stream. Values can be LOW/MEDIUM/HIGH/EXTRA.
 
+**MAGIO_DEVICE_TYPE** sets the device type sent to Magio APIs. The default is OTT_STB.
+You can also use **OTT_ANDROID** for a mobile profile.
+
+**MAGIO_DEVICE_NAME** sets the device name sent to Magio APIs. The default is Magio IPTV Server.
+
 ### Python
 ```shell script
 # install dependencies
@@ -77,6 +82,10 @@ set MAGIO_GUIDE_DAYS=7
 set MAGIO_GUIDE_REFRESH_HOURS=12
 # optional, default is HIGH
 set MAGIO_QUALITY=HIGH
+# optional, default is OTT_STB
+set MAGIO_DEVICE_TYPE=OTT_STB
+# optional, default is Magio IPTV Server
+set MAGIO_DEVICE_NAME=Magio IPTV Server
 
 # run the application
 flask run --host=0.0.0.0
@@ -85,7 +94,7 @@ flask run --host=0.0.0.0
 
 ### Docker
 ```shell script
-docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=your_password --env MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000 --env MAGIO_GUIDE_DAYS=7 --env MAGIO_GUIDE_REFRESH_HOURS=12 --name magiogo-iptv-server cvb941/magiogo-iptv-server
+docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=your_password --env MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000 --env MAGIO_GUIDE_DAYS=7 --env MAGIO_GUIDE_REFRESH_HOURS=12 --env MAGIO_DEVICE_TYPE=OTT_STB --env MAGIO_DEVICE_NAME="Magio IPTV Server" --name magiogo-iptv-server cvb941/magiogo-iptv-server
 ```
 
 ### Docker Compose
@@ -103,6 +112,8 @@ services:
             - MAGIO_GUIDE_DAYS=7
             - MAGIO_GUIDE_REFRESH_HOURS=12
             - MAGIO_QUALITY=HIGH
+            - MAGIO_DEVICE_TYPE=OTT_STB
+            - MAGIO_DEVICE_NAME=Magio IPTV Server
         container_name: magiogo-iptv-server
 ```
 

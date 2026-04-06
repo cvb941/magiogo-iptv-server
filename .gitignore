@@ -1,4 +1,5 @@
 storage
+.DS_Store
 public/magioGuide.xmltv
 public/magioGuide.xmltv.gz
 public/magioPlaylist.m3u8
