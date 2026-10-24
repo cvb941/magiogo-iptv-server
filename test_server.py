@@ -16,6 +16,58 @@ from magiogo import MagioGo, NetConnectionError
 
 
 class StartupTests(unittest.TestCase):
+    def test_restart_reuses_fresh_guide_but_refreshes_stale_or_incomplete_cache(self):
+        previous_directory = os.getcwd()
+        previous_app = sys.modules.pop('app', None)
+        try:
+            for state in ('fresh', 'stale', 'incomplete'):
+                with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                    os.chdir(directory)
+                    Path('public').mkdir()
+                    names = ['magioPlaylist.m3u8', 'magioGuide.xmltv', 'magioGuide.xmltv.gz']
+                    for name in names:
+                        path = Path('public') / name
+                        path.write_bytes(b'cached')
+                        if state == 'stale':
+                            modified = time.time() - 13 * 3600
+                            os.utime(path, (modified, modified))
+                    if state == 'incomplete':
+                        (Path('public') / names[-1]).unlink()
+                    entered, release = threading.Event(), threading.Event()
+                    client = Mock()
+                    client.epg.return_value = {}
+
+                    def channels():
+                        entered.set()
+                        release.wait(3)
+                        return []
+
+                    client.channels.side_effect = channels
+                    module = None
+                    try:
+                        with patch.dict(os.environ, {'MAGIO_USERNAME': 'test', 'MAGIO_PASSWORD': 'test', 'MAGIO_GUIDE_REFRESH_HOURS': '12'}), patch('magiogo.MagioGo', return_value=client), patch('atexit.register'):
+                            module = importlib.import_module('app')
+                        if state == 'fresh':
+                            client.channels.assert_not_called()
+                            self.assertIsNotNone(module.last_refresh)
+                            due = module.scheduler.get_job('guide-refresh').next_run_time.timestamp()
+                            self.assertGreater(due - time.time(), 12 * 3600 - 5)
+                            module.app.static_folder = str(Path('public').resolve())
+                            with module.app.test_client().get('/magioGuide.xmltv') as response:
+                                self.assertEqual(response.data, b'cached')
+                        else:
+                            self.assertTrue(entered.wait(1))
+                    finally:
+                        release.set()
+                        if module is not None:
+                            module.scheduler.shutdown()
+                        sys.modules.pop('app', None)
+                        os.chdir(previous_directory)
+        finally:
+            if previous_app is not None:
+                sys.modules['app'] = previous_app
+            os.chdir(previous_directory)
+
     def test_http_and_streaming_are_available_while_initial_refresh_is_blocked(self):
         entered, release = threading.Event(), threading.Event()
         client = Mock()

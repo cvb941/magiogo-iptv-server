@@ -156,10 +156,17 @@ if missing_credentials:
 magio = MagioGo("./storage", magio_username, magio_password, quality, device_type, device_name)
 
 # Start HTTP without waiting for Magio; only one refresh can run at a time.
+refresh_hours = int(os.environ.get('MAGIO_GUIDE_REFRESH_HOURS', 12))
+next_refresh = datetime.datetime.now(datetime.timezone.utc)
+guide_files = [Path('public') / name for name in ('magioPlaylist.m3u8', 'magioGuide.xmltv', 'magioGuide.xmltv.gz')]
+if all(path.is_file() and path.stat().st_size for path in guide_files):
+    cached_refresh = min(next_refresh.timestamp(), *(path.stat().st_mtime for path in guide_files))
+    last_refresh = datetime.datetime.fromtimestamp(cached_refresh).strftime("%d/%m/%Y %H:%M:%S")
+    next_refresh = max(next_refresh, datetime.datetime.fromtimestamp(cached_refresh, datetime.timezone.utc)
+                       + datetime.timedelta(hours=refresh_hours))
 scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(refresh, 'interval', id='guide-refresh',
-                  hours=int(os.environ.get('MAGIO_GUIDE_REFRESH_HOURS', 12)),
-                  next_run_time=datetime.datetime.now(datetime.timezone.utc),
+                  hours=refresh_hours, next_run_time=next_refresh,
                   max_instances=1, coalesce=True)
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown(wait=False))

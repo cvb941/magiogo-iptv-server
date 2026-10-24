@@ -69,6 +69,7 @@ You can also use **OTT_ANDROID** for a mobile profile.
 **MAGIO_DEVICE_NAME** sets the device name sent to Magio APIs. The default is Magio IPTV Server.
 
 The HTTP server starts immediately while playlist and guide updates run in the background.
+After a restart, complete cached files are reused until the configured refresh interval expires.
 Failed updates are retried after five minutes; existing files remain available until their replacements are ready.
 Playback requests take priority over guide updates. Magio API calls are spaced at least one second apart,
 with a six-second gap before guide requests and a shared cooldown honoring `Retry-After` after rate limits.
