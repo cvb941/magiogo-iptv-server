@@ -86,8 +86,9 @@ class MagioRequestTests(unittest.TestCase):
     def test_guide_requests_are_spaced_across_pages_and_days(self):
         elapsed = [0]
         requested_at = []
-        pages = iter(({'success': True, 'items': [{'programs': []}] * 20},
-                      {'success': True, 'items': []}, {'success': True, 'items': []}))
+        pages = iter(({'success': True, 'totalCount': 152, 'items': [{'programs': []}] * 100},
+                      {'success': True, 'totalCount': 152, 'items': [{'programs': []}] * 52},
+                      {'success': True, 'totalCount': 0, 'items': []}))
         session = MagicMock()
         session.__enter__.return_value = session
         self.client._api_background_after = 6
@@ -108,6 +109,15 @@ class MagioRequestTests(unittest.TestCase):
         self.assertEqual(len(requested_at), 3)
         self.assertGreaterEqual(requested_at[0], 6)
         self.assertTrue(all(second - first >= 6 for first, second in zip(requested_at, requested_at[1:])))
+        self.assertEqual([call.kwargs['params']['offset'] for call in session.get.call_args_list], [0, 100, 0])
+        self.assertTrue(all(call.kwargs['params']['limit'] == '100' for call in session.get.call_args_list))
+
+    def test_guide_pagination_handles_an_api_page_size_cap(self):
+        responses = [{'items': [{'programs': []}] * 20, 'totalCount': 25},
+                     {'items': [{'programs': []}] * 5, 'totalCount': 25}]
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=responses) as api:
+            self.client.epg([], datetime(2026, 1, 1), datetime(2026, 1, 1))
+        self.assertEqual([call.kwargs['params']['offset'] for call in api.call_args_list], [0, 20])
 
     def test_playback_overtakes_waiting_guide_requests(self):
         waiting, playback, release = threading.Event(), threading.Event(), threading.Event()

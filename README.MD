@@ -73,6 +73,7 @@ Failed updates are retried after five minutes; existing files remain available u
 Playback requests take priority over guide updates. Magio API calls are spaced at least one second apart,
 with a six-second gap before guide requests and a shared cooldown honoring `Retry-After` after rate limits.
 Guide requests slow down further if Magio still reports a rate limit.
+Guide pages request up to 100 channels per call.
 When a channel's requested quality is unavailable, a verified medium-quality fallback is remembered
 for one hour in `storage`; the requested quality is checked again after that period.
 
