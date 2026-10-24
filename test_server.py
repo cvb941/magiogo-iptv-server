@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -80,6 +81,24 @@ class MagioRequestTests(unittest.TestCase):
                         getattr(self.client, '_' + method)('https://api.test')
                 self.assertEqual(getattr(session, method).call_args.kwargs['timeout'], (5, 15))
                 session.__exit__.assert_called()
+
+    def test_guide_requests_are_spaced_across_pages_and_days(self):
+        elapsed = [0]
+        requested_at = []
+        pages = iter(({'items': [{'programs': []}] * 20}, {'items': []}, {'items': []}))
+
+        def sleep(seconds):
+            elapsed[0] += seconds
+
+        def get(*args, **kwargs):
+            requested_at.append(elapsed[0])
+            return next(pages)
+
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=get), patch('magiogo.time.sleep', side_effect=sleep):
+            self.client.epg([], datetime(2026, 1, 1), datetime(2026, 1, 2))
+        self.assertEqual(len(requested_at), 3)
+        self.assertGreaterEqual(requested_at[0], 2)
+        self.assertTrue(all(second - first >= 2 for first, second in zip(requested_at, requested_at[1:])))
 
     def test_simultaneous_login_does_not_register_two_devices(self):
         entered, release = threading.Event(), threading.Event()

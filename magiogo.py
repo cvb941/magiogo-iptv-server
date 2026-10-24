@@ -286,6 +286,8 @@ class MagioGo(IPTVClient):
             fetch_more = True
             offset = 0
             while fetch_more:
+                # Leave API capacity for playback, including between guide days.
+                time.sleep(2)
                 resp = self._get('https://skgo.magio.tv/v2/television/epg',
                                  params={'filter': filter, 'limit': '20', 'offset': offset * 20, 'list': 'LIVE'},
                                  headers=self._auth_headers())
@@ -310,9 +312,6 @@ class MagioGo(IPTVClient):
                         programme.is_replyable = (programme.start_time > (now - datetime.timedelta(days=7))) and (programme.end_time < now)
 
                         ret[channel].append(programme)
-
-                if fetch_more:
-                    time.sleep(1)
 
         return ret
 
