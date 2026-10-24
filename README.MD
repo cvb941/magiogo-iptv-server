@@ -115,7 +115,9 @@ flask run --host=0.0.0.0
 ```
 
 On Linux, use `gunicorn --config gunicorn.conf.py app:app` for production.
-The Docker image uses this command with one `gthread` worker and 16 threads.
+The Docker image uses this command with one threaded worker and 16 threads.
+A small `gthread` subclass drains closing sockets in request threads so FFmpeg clients
+cannot stall the worker's accept loop.
 Keep preloading disabled and the worker count at one: the guide scheduler and live session maps
 belong to that worker. Shutdown cancels queued API work and saves CDN sessions before exiting.
 Gunicorn allows up to eight seconds to drain requests; Compose gives the container 15 seconds to stop.

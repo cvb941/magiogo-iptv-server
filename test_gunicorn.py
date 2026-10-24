@@ -1,4 +1,5 @@
 import importlib.util
+import http.client
 import json
 import os
 import signal
@@ -10,6 +11,7 @@ import time
 import unittest
 import urllib.request
 from pathlib import Path
+from contextlib import ExitStack
 from types import SimpleNamespace
 
 
@@ -79,6 +81,15 @@ from app import app
                     self.assertTrue(status['guide']['refreshing'])
                     self.assertEqual(status['api']['requests'], 0)
                     self.assertEqual(len((path / 'guide-started').read_text().splitlines()), 1)
+                    with ExitStack() as connections:
+                        started = time.monotonic()
+                        for _ in range(3):
+                            client = connections.enter_context(socket.create_connection(('127.0.0.1', port), timeout=3))
+                            client.sendall(b'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+                            with http.client.HTTPResponse(client) as response:
+                                response.begin()
+                                self.assertEqual(json.loads(response.read()), {'status': 'ok'})
+                        self.assertLess(time.monotonic() - started, 1.5, 'Closing clients blocked the accept loop')
                     started = time.monotonic()
                     process.terminate()
                     self.assertEqual(process.wait(timeout=5), 0)
