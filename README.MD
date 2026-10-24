@@ -80,6 +80,8 @@ for one hour in `storage`; the requested quality is checked again after that per
 Verified DASH URLs, CDN cookies and proxy session IDs are saved privately in `storage/dash-sessions.json`.
 They survive restarts for up to 30 minutes of inactivity, scoped to the account, device and quality settings.
 Restored channels fetch a fresh CDN manifest without calling Magio; rejected sessions request a new stream URL.
+Authentication updates are saved atomically only after a complete login or token refresh succeeds.
+Failed attempts preserve the previous session; token files are written with owner-only permissions.
 
 ### Python
 ```shell script

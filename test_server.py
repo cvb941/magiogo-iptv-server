@@ -1,4 +1,6 @@
 import importlib
+import copy
+import json
 import os
 import sys
 import tempfile
@@ -7,12 +9,13 @@ import time
 import unittest
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import requests
 
-from magiogo import MagioGo, NetConnectionError
+from magiogo import MagioGo, MagioGoException, NetConnectionError, UserInvalidException
 
 
 class StartupTests(unittest.TestCase):
@@ -286,7 +289,7 @@ class MagioRequestTests(unittest.TestCase):
         def login():
             entered.set()
             release.wait(2)
-            self.client._data.access_token = 'saved'
+            return {'success': True, 'token': {'accessToken': 'saved', 'refreshToken': 'refresh', 'type': 'Bearer', 'expiresIn': int((time.time() + 3600) * 1000)}}
 
         with patch.object(self.client, '_load_session'), patch.object(self.client, '_init_and_login', side_effect=login) as init:
             threads = [threading.Thread(target=self.client._login) for _ in range(2)]
@@ -333,6 +336,9 @@ class MagioRequestTests(unittest.TestCase):
         missing.__enter__.return_value = missing
         ready.__enter__.return_value = ready
         self.client._data.access_token = 'saved'
+        self.client._data.refresh_token = 'saved-refresh'
+        self.client._data.type = 'Bearer'
+        self.client._data.expires_in = int((time.time() + 86400) * 1000)
         with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=[{'url': 'https://cdn.test/high.mpd'}, {'url': 'https://cdn.test/medium.mpd'}]), patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
             self.client.channel_stream_info('1', quality_override='p4')
 
@@ -355,6 +361,7 @@ class MagioRequestTests(unittest.TestCase):
         with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/missing.mpd'}), patch('magiogo.requests.get', return_value=missing), patch('magiogo.time.sleep'):
             self.client.channel_stream_info('1', quality_override='p4')
         self.assertEqual(self.client._data.stream_qualities, {})
+
 
     def test_cached_fallback_is_scoped_to_channel_device_and_requested_quality(self):
         missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
@@ -379,3 +386,201 @@ class MagioRequestTests(unittest.TestCase):
             self.client.channel_stream_info('1', quality_override='p4')
         self.assertEqual([call.kwargs['params']['prof'] for call in api.call_args_list], ['p2', 'p4'])
         self.assertEqual(self.client._data.stream_qualities, {})
+
+
+class MagioAuthTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.client = MagioGo(self.directory.name, 'test', 'test')
+        self.client._data.access_token = 'old-access'
+        self.client._data.refresh_token = 'old-refresh'
+        self.client._data.type = 'Bearer'
+        self.client._data.expires_in = int((time.time() - 60) * 1000)
+        self.client._data.stream_qualities = {'channel': {'quality': 'p2', 'expires': time.time() + 3600}}
+        self.client._data.other_metadata = {'keep': True}
+        self.client._store_session(self.client._data)
+        self.path = Path(self.client._storage_file)
+        self.previous_bytes = self.path.read_bytes()
+        self.previous_data = copy.deepcopy(self.client._data.__dict__)
+        self.responses = []
+        self.session = MagicMock()
+        self.session.__enter__.return_value = self.session
+        self.session.post.side_effect = lambda *args, **kwargs: self.reply(self.responses.pop(0))
+        transport = patch.object(self.client, '_request', return_value=self.session)
+        transport.start()
+        self.addCleanup(transport.stop)
+        slot = patch.object(self.client, '_api_slot', side_effect=lambda *args, **kwargs: nullcontext())
+        slot.start()
+        self.addCleanup(slot.stop)
+
+    @staticmethod
+    def reply(action):
+        if isinstance(action, Exception):
+            raise action
+        status, payload = action if isinstance(action, tuple) else (200, action)
+        response = requests.Response()
+        response.status_code = status
+        response._content = json.dumps(payload).encode()
+        response._content_consumed = True
+        response.url = 'https://api.test/auth'
+        return response
+
+    @staticmethod
+    def authenticated():
+        return {'success': True, 'token': {'accessToken': 'new-access', 'refreshToken': 'new-refresh', 'type': 'Bearer', 'expiresIn': int((time.time() + 3600) * 1000)}}
+
+    @staticmethod
+    def anonymous():
+        return {'success': True, 'token': {'accessToken': 'anonymous-access', 'type': 'Temporary'}}
+
+    def assert_previous_session(self):
+        self.assertEqual(self.path.read_bytes(), self.previous_bytes)
+        self.assertEqual(self.client._data.__dict__, self.previous_data)
+        self.assertEqual(self.client._auth_headers()['Authorization'], 'Bearer old-access')
+        self.assertEqual(list(Path(self.directory.name).iterdir()), [self.path])
+
+    def test_refresh_commits_once_and_preserves_quality_cache_and_other_metadata(self):
+        self.responses = [self.authenticated()]
+        with patch.object(self.client, '_store_session', wraps=self.client._store_session) as store:
+            self.client._login()
+        store.assert_called_once()
+        self.assertEqual(self.session.post.call_args.args[0].rsplit('/', 1)[-1], 'tokens')
+        self.assertEqual(self.client._data.access_token, 'new-access')
+        self.assertEqual(self.client._data.refresh_token, 'new-refresh')
+        self.assertEqual(self.client._data.stream_qualities, self.previous_data['stream_qualities'])
+        self.assertEqual(self.client._data.other_metadata, {'keep': True})
+        self.assertEqual(json.loads(self.path.read_text()), self.client._data.__dict__)
+        if os.name != 'nt':
+            self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_failed_refresh_transport_or_rate_limit_does_not_start_a_new_login(self):
+        for action in (requests.ReadTimeout('timeout'), (429, {}), (503, {}), {'success': False, 'errorCode': 'RATE_LIMIT_EXCEEDED'}):
+            with self.subTest(action=type(action).__name__):
+                self.responses = [action]
+                self.session.post.reset_mock()
+                with self.assertRaises((NetConnectionError, MagioGoException)):
+                    self.client._login()
+                self.assertEqual(self.session.post.call_count, 1)
+                self.assert_previous_session()
+
+    def test_rejected_refresh_uses_temporary_token_and_saves_only_authenticated_result(self):
+        self.responses = [(403, {'success': False, 'errorCode': 'Forbidden'}), self.anonymous(), self.authenticated()]
+        with patch.object(self.client, '_store_session', wraps=self.client._store_session) as store:
+            self.client._login()
+        store.assert_called_once()
+        self.assertEqual([call.args[0].rsplit('/', 1)[-1] for call in self.session.post.call_args_list], ['tokens', 'init', 'login'])
+        self.assertEqual(self.session.post.call_args.kwargs['headers']['Authorization'], 'Temporary anonymous-access')
+        self.assertEqual(self.client._auth_headers()['Authorization'], 'Bearer new-access')
+        self.assertEqual(json.loads(self.path.read_text())['stream_qualities'], self.previous_data['stream_qualities'])
+
+    def test_refresh_rate_limit_honors_retry_after_without_registering_a_device(self):
+        response = self.reply((429, {}))
+        response.headers['Retry-After'] = '60'
+        self.session.post.side_effect = lambda *args, **kwargs: response
+        with patch('magiogo.time.monotonic', return_value=100), self.assertRaises(NetConnectionError):
+            self.client._login()
+        self.assertEqual(self.client._api_next_request, 160)
+        self.assertEqual(self.session.post.call_count, 1)
+        self.assert_previous_session()
+
+    def test_rejected_refresh_in_json_still_recovers_with_a_full_login(self):
+        self.responses = [{'success': False, 'errorCode': 'INVALID_REFRESH_TOKEN'}, self.anonymous(), self.authenticated()]
+        self.client._login()
+        self.assertEqual(self.session.post.call_count, 3)
+        self.assertEqual(self.client._data.access_token, 'new-access')
+        self.assertEqual(self.client._data.stream_qualities, self.previous_data['stream_qualities'])
+
+    def test_failed_login_after_initialization_preserves_old_memory_and_disk(self):
+        for failure in (requests.ReadTimeout('login timeout'), {'success': False, 'errorCode': 'INVALID_CREDENTIALS'}):
+            with self.subTest(failure=type(failure).__name__):
+                self.responses = [(401, {}), self.anonymous(), failure]
+                with patch.object(self.client, '_store_session', wraps=self.client._store_session) as store:
+                    with self.assertRaises((NetConnectionError, UserInvalidException)):
+                        self.client._login()
+                store.assert_not_called()
+                self.assert_previous_session()
+
+    def test_failed_first_login_does_not_create_an_anonymous_session_file(self):
+        self.path.unlink()
+        self.client._data.access_token = ''
+        self.client._data.refresh_token = ''
+        previous = copy.deepcopy(self.client._data.__dict__)
+        self.responses = [self.anonymous(), {'success': False, 'errorCode': 'INVALID_CREDENTIALS'}]
+        with self.assertRaises(UserInvalidException):
+            self.client._login()
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.client._data.__dict__, previous)
+
+    def test_incomplete_or_expired_refresh_response_is_not_committed(self):
+        for field, value in (('accessToken', ''), ('refreshToken', None), ('type', None), ('expiresIn', 0), ('expiresIn', True), ('expiresIn', 'later'), ('expiresIn', float('inf'))):
+            with self.subTest(field=field, value=value):
+                payload = self.authenticated()
+                payload['token'][field] = value
+                self.responses = [payload]
+                with self.assertRaises(MagioGoException):
+                    self.client._login()
+                self.assert_previous_session()
+        self.responses = [{'success': True}]
+        with self.assertRaises(MagioGoException):
+            self.client._login()
+        self.assert_previous_session()
+
+    def test_invalid_initialization_response_does_not_send_credentials_or_change_session(self):
+        self.responses = [(403, {}), {'success': True, 'token': {}}]
+        with self.assertRaises(MagioGoException):
+            self.client._login()
+        self.assertEqual([call.args[0].rsplit('/', 1)[-1] for call in self.session.post.call_args_list], ['tokens', 'init'])
+        self.assert_previous_session()
+
+    def test_failed_atomic_write_keeps_old_session_and_removes_temporary_file(self):
+        self.responses = [self.authenticated()]
+        with patch('client.os.replace', side_effect=OSError('disk failed')), self.assertRaises(OSError):
+            self.client._login()
+        self.assert_previous_session()
+
+    def test_parallel_players_share_one_refresh_and_do_not_see_partial_tokens(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def refresh(*args, **kwargs):
+            entered.set()
+            release.wait(3)
+            return self.reply(self.authenticated())
+
+        self.session.post.side_effect = refresh
+        with ThreadPoolExecutor(2) as pool:
+            first = pool.submit(self.client._login)
+            try:
+                self.assertTrue(entered.wait(1))
+                second = pool.submit(self.client._login)
+                self.assert_previous_session()
+            finally:
+                release.set()
+            first.result(2)
+            second.result(2)
+        self.assertEqual(self.session.post.call_count, 1)
+        self.assertEqual(self.client._data.access_token, 'new-access')
+
+    def test_parallel_players_do_not_publish_anonymous_token_during_relogin(self):
+        entered, release = threading.Event(), threading.Event()
+        self.responses = [(403, {}), self.anonymous(), self.authenticated()]
+
+        def post(url, **kwargs):
+            if url.endswith('/login'):
+                entered.set()
+                release.wait(3)
+            return self.reply(self.responses.pop(0))
+
+        self.session.post.side_effect = post
+        with ThreadPoolExecutor(2) as pool:
+            first = pool.submit(self.client._login)
+            try:
+                self.assertTrue(entered.wait(1))
+                second = pool.submit(self.client._login)
+                self.assert_previous_session()
+            finally:
+                release.set()
+            first.result(2)
+            second.result(2)
+        self.assertEqual(self.session.post.call_count, 3)
+        self.assertEqual(self.client._data.access_token, 'new-access')

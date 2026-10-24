@@ -5,6 +5,7 @@ import requests
 import json
 import threading
 import logging
+import copy
 from contextlib import contextmanager
 
 try:
@@ -80,25 +81,34 @@ class MagioGo(IPTVClient):
         super().__init__(storage_dir, '%s.session' % self._user_name)
 
     def _check_response(self, resp):
-        # SUCCESS path: extract & store tokens if present, then return
         if resp.get('success', False):
-            if 'token' in resp:
-                self._data.access_token  = resp['token']['accessToken']
-                self._data.refresh_token = resp['token']['refreshToken']
-                self._data.expires_in    = resp['token']['expiresIn']
-                self._data.type          = resp['token']['type']
-                self._store_session(self._data)
             return
 
-        # ERROR path: only executed if success==False
         error_code = resp.get('errorCode')
         if error_code == 'INVALID_CREDENTIALS':
             raise UserInvalidException()
         raise MagioGoException(error_code, resp.get('errorMessage'))
 
-    def _auth_headers(self):
+    @staticmethod
+    def _token_session(resp, previous=None, authenticated=True):
+        token = resp.get('token')
+        fields = ('accessToken', 'type', 'refreshToken') if authenticated else ('accessToken', 'type')
+        if not isinstance(token, dict) or any(not isinstance(token.get(field), str) or not token[field] for field in fields):
+            raise MagioGoException('INVALID_TOKEN_RESPONSE', 'Incomplete Magio authentication response')
+        expires = token.get('expiresIn', 0)
+        if authenticated and (type(expires) not in (int, float) or not time.time() * 1000 < expires < float('inf')):
+            raise MagioGoException('INVALID_TOKEN_RESPONSE', 'Invalid Magio token expiration')
+        data = copy.deepcopy(previous) if previous is not None else MagioGoSessionData()
+        data.access_token = token['accessToken']
+        data.type = token['type']
+        data.refresh_token = token.get('refreshToken', '')
+        data.expires_in = expires
+        return data
+
+    def _auth_headers(self, data=None):
+        data = self._data if data is None else data
         return {
-            'Authorization': f"{self._data.type} {self._data.access_token}",
+            'Authorization': f"{data.type} {data.access_token}",
             'X-ClientId': '-1',
             'Origin': 'https://www.magiogo.sk',
             'Pragma': 'no-cache',
@@ -145,24 +155,28 @@ class MagioGo(IPTVClient):
                     self._api_foreground -= 1
                 self._api_condition.notify_all()
 
+    def _apply_api_cooldown(self, response, attempt=0):
+        if response.status_code not in (429, 500, 502, 503, 504):
+            return False
+        delay = Retry().get_retry_after(response)
+        delay = delay if delay is not None else min(2 ** (attempt + 1), 5)
+        with self._api_condition:
+            self._api_next_request = max(self._api_next_request, time.monotonic() + delay)
+            if response.status_code == 429:
+                self._api_guide_interval = min(self._api_guide_interval * 2, 60)
+                self._api_background_after = max(self._api_background_after, self._api_next_request)
+            self._api_condition.notify_all()
+        logging.getLogger(__name__).warning('Magio API returned %s; next request in %.1fs', response.status_code, delay)
+        return True
+
     def _get(self, url, params=None, background=False, **kwargs):
         kwargs.setdefault('timeout', (5, 15))
         try:
             with self._request() as session:
                 for attempt in range(3):
                     with self._api_slot(background), session.get(url, params=params, **kwargs) as response:
-                        if response.status_code in (429, 500, 502, 503, 504):
-                            delay = Retry().get_retry_after(response)
-                            delay = delay if delay is not None else min(2 ** (attempt + 1), 5)
-                            with self._api_condition:
-                                self._api_next_request = max(self._api_next_request, time.monotonic() + delay)
-                                if response.status_code == 429:
-                                    self._api_guide_interval = min(self._api_guide_interval * 2, 60)
-                                    self._api_background_after = max(self._api_background_after, self._api_next_request)
-                                self._api_condition.notify_all()
-                            logging.getLogger(__name__).warning('Magio API returned %s; next request in %.1fs', response.status_code, delay)
-                            if attempt < 2:
-                                continue
+                        if self._apply_api_cooldown(response, attempt) and attempt < 2:
+                            continue
                         response.raise_for_status()
                         resp = response.json()
                         break
@@ -176,16 +190,17 @@ class MagioGo(IPTVClient):
         try:
             with self._api_slot(), self._request() as session:
                 with session.post(url, data=data, json=json, **kwargs) as response:
+                    self._apply_api_cooldown(response)
                     response.raise_for_status()
                     resp = response.json()
             self._check_response(resp)
             return resp
         except requests.RequestException as err:
-            raise NetConnectionError(str(err))
+            raise NetConnectionError(str(err)) from err
 
     def _init_and_login(self):
         # INIT: register this "device"
-        self._post(
+        initialized = self._post(
             'https://skgo.magio.tv/v2/auth/init',
                 params={
                     'dsid': f"Netscape.{int(time.time())}.{random.random()}",
@@ -210,11 +225,12 @@ class MagioGo(IPTVClient):
             {'loginOrNickname': self._user_name, 'password': self._password},
             separators=(',', ':')
         )
-        self._post(
+        temporary = self._token_session(initialized, authenticated=False)
+        return self._post(
             'https://skgo.magio.tv/v2/auth/login',
             data=login_body,
             headers={
-                **self._auth_headers(),
+                **self._auth_headers(temporary),
                 'Content-Type': 'application/json',
             }
         )
@@ -223,20 +239,32 @@ class MagioGo(IPTVClient):
         with self._auth_lock:
             if not self._user_name or not self._password:
                 raise UserNotDefinedException
-            self._load_session(self._data)
-            if not self._data.access_token:
-                self._init_and_login()
-            if self._data.refresh_token and self._data.expires_in < int(time.time() * 1000):
+            saved = copy.deepcopy(self._data)
+            self._load_session(saved)
+            has_tokens = all(isinstance(value, str) and value for value in (saved.access_token, saved.refresh_token, saved.type))
+            if has_tokens and type(saved.expires_in) in (int, float) and time.time() * 1000 < saved.expires_in < float('inf'):
+                self._data = saved
+                return
+            if has_tokens:
                 try:
-                    self._post(
+                    response = self._post(
                         'https://skgo.magio.tv/v2/auth/tokens',
-                        json={'refreshToken': self._data.refresh_token},
-                        headers=self._auth_headers()
+                        json={'refreshToken': saved.refresh_token},
+                        headers=self._auth_headers(saved)
                     )
-                except MagioGoException:
-                    self._data = MagioGoSessionData()
-                    self._store_session(self._data)
-                    self._init_and_login()
+                except (MagioGoException, UserInvalidException, NetConnectionError) as error:
+                    if isinstance(error, NetConnectionError):
+                        rejected = getattr(error.__cause__, 'response', None)
+                        if rejected is None or rejected.status_code not in (401, 403):
+                            raise
+                    elif isinstance(error, MagioGoException) and error.id == 'RATE_LIMIT_EXCEEDED':
+                        raise
+                    response = self._init_and_login()
+            else:
+                response = self._init_and_login()
+            candidate = self._token_session(response, saved)
+            self._store_session(candidate)
+            self._data = candidate
 
     def channels(self, progress=dummy_progress):
         self._login()

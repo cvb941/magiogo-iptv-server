@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 from datetime import datetime
 
 try:
@@ -138,16 +139,21 @@ class IPTVClient(object):
         raise NotImplementedError("Should have implemented this")
 
     def _store_session(self, data):
-        if not os.path.exists(self._storage_path):
-            os.makedirs(self._storage_path)
-
-        tmp_file = f"{self._storage_file}.tmp"
-        with open(tmp_file, 'w', encoding='utf-8') as f:
-            json.dump(data.__dict__, f)
-            f.flush()
-            os.fsync(f.fileno())
-
-        os.replace(tmp_file, self._storage_file)
+        os.makedirs(self._storage_path, mode=0o700, exist_ok=True)
+        tmp_file = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=self._storage_path, delete=False) as f:
+                tmp_file = f.name
+                json.dump(data.__dict__, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_file, self._storage_file)
+        finally:
+            if tmp_file is not None:
+                try:
+                    os.unlink(tmp_file)
+                except OSError:
+                    pass
 
     def _load_session(self, data):
         if not os.path.exists(self._storage_file):
