@@ -136,3 +136,7 @@ some shows, which unfortunately causes DVRs like Plex to consider them as movies
 Sorien - https://github.com/Sorien/plugin.video.iptv.magiogo
 
 rmich - Additional fixes (https://www.xbmc-kodi.cz/prispevek-magio-go-addon?pid=104154#pid104154)
+
+## License
+
+[MIT](LICENSE).
