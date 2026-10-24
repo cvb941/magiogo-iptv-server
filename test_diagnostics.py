@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import dash_proxy
 from diagnostics import Diagnostics, utc_time
-from magiogo import MagioGo, MagioGoSessionData
+from magiogo import ApiCooldownError, MagioGo, MagioGoSessionData
 
 
 @contextmanager
@@ -49,6 +49,15 @@ def diagnostic_app():
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_playback_cooldown_is_a_retryable_response_without_private_details(self):
+        with diagnostic_app() as module, patch.object(module.magio, 'channel_stream_info', side_effect=ApiCooldownError(60)):
+            result = module.app.test_client().get('/channel/cooldown-test')
+            self.assertEqual(result.status_code, 503)
+            self.assertEqual(result.headers['Retry-After'], '60')
+            self.assertEqual(result.headers['Cache-Control'], 'no-store')
+            self.assertEqual(result.json, {'error': 'upstream_unavailable', 'retry_after': 60})
+            self.assertEqual(module.app.test_client().get('/health').status_code, 200)
+
     def test_parallel_recording_does_not_lose_events(self):
         metrics = Diagnostics()
 

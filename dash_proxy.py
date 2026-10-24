@@ -21,6 +21,7 @@ dash_proxy = Blueprint('dash_proxy', __name__)
 SEGMENT_SESSIONS = {}
 SEGMENT_SESSIONS_LOCK = threading.Lock()
 SEGMENT_SESSION_TTL_SECONDS = 30 * 60
+STALE_SESSION_RETENTION_SECONDS = 24 * 60 * 60
 CHANNEL_SESSIONS = {}
 CHANNEL_LOCKS = {}
 CDN_ADAPTER = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16)
@@ -53,7 +54,7 @@ def init_session_cache(app, path, context):
         sessions = {}
         for sid, entry in data['sessions'].items():
             remaining = float(entry['expires']) - wall
-            if not math.isfinite(remaining) or remaining <= 0:
+            if not math.isfinite(remaining) or remaining + STALE_SESSION_RETENTION_SECONDS <= 0:
                 continue
             url = urlsplit(entry['manifest_url'])
             if uuid.UUID(sid).hex != sid or url.scheme not in ('http', 'https') or not url.netloc:
@@ -102,7 +103,9 @@ def _persist_sessions(force=False):
                 sid: {'manifest_url': entry['manifest_url'], 'user_agent': entry['user_agent'],
                       'origins': list(entry['origins']), 'cookies': [dict(cookie.__dict__) for cookie in entry['cookies']],
                       'expires': wall + entry['expires'] - now}
-                for sid, entry in SEGMENT_SESSIONS.items() if entry['expires'] > now
+                for sid, entry in SEGMENT_SESSIONS.items()
+                if entry['expires'] + STALE_SESSION_RETENTION_SECONDS > now
+                and (entry['expires'] > now or sid in CHANNEL_SESSIONS.values())
             }
             channels = [[*key, sid] for key, sid in CHANNEL_SESSIONS.items() if sid in sessions]
         temporary = None
@@ -222,12 +225,12 @@ def _fetch_manifest(stream_info, public_url, key):
     with SEGMENT_SESSIONS_LOCK:
         sid = CHANNEL_SESSIONS.get(key)
         cached = SEGMENT_SESSIONS.get(sid)
-        if cached and cached['expires'] <= now:
+        if cached and cached['expires'] + STALE_SESSION_RETENTION_SECONDS <= now:
             cached = None
         if cached:
             _record('session_cache_hits')
-            cached['expires'] = now + SEGMENT_SESSION_TTL_SECONDS
-            if now - cached['manifest_time'] < 2:
+            if cached['expires'] > now and now - cached['manifest_time'] < 2:
+                cached['expires'] = now + SEGMENT_SESSION_TTL_SECONDS
                 _record('manifest_cache_hits')
                 return Response(cached['manifest'], mimetype='application/dash+xml')
 
@@ -269,8 +272,12 @@ def _fetch_manifest(stream_info, public_url, key):
 
     now = time.monotonic()
     with SEGMENT_SESSIONS_LOCK:
-        for expired_sid in [key for key, value in SEGMENT_SESSIONS.items() if value['expires'] <= now]:
+        for expired_sid in [key for key, value in SEGMENT_SESSIONS.items()
+                            if value['expires'] + STALE_SESSION_RETENTION_SECONDS <= now
+                            or (value['expires'] <= now and key not in CHANNEL_SESSIONS.values())]:
             del SEGMENT_SESSIONS[expired_sid]
+        for channel in [key for key, value in CHANNEL_SESSIONS.items() if value not in SEGMENT_SESSIONS]:
+            del CHANNEL_SESSIONS[channel]
         SEGMENT_SESSIONS[sid] = {
             'origins': origins, 'cookies': cookies, 'user_agent': user_agent,
             'expires': now + SEGMENT_SESSION_TTL_SECONDS,
@@ -293,7 +300,6 @@ def segment_proxy(sid, origin_id, subpath):
         if session_info is None:
             return Response(status=404)
         if session_info['expires'] <= now:
-            del SEGMENT_SESSIONS[sid]
             return Response(status=410)
         if origin_id >= len(session_info['origins']):
             return Response(status=404)

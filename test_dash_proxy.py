@@ -241,13 +241,46 @@ class DashProxyTests(unittest.TestCase):
         response = self.client.get(path)
         self.assertEqual(response.status_code, 410)
         self.assertNotIn('Location', response.headers)
-        self.assertEqual(self.client.get(path).status_code, 404)
+        self.assertEqual(self.client.get(path).status_code, 410)
 
     def test_cleanup_removes_idle_sessions_only(self):
         self.segment_path()
-        self.now += 1801
+        self.now += proxy.STALE_SESSION_RETENTION_SECONDS + 1801
         self.segment_path()
         self.assertEqual(len(proxy.SEGMENT_SESSIONS), 1)
+
+    def test_idle_session_is_revalidated_before_requesting_magio(self):
+        path = self.segment_path()
+        self.now += 1801
+        self.stream_info.side_effect = AssertionError('Magio must not be contacted')
+        type(self).manifest = '<MPD publishTime="revalidated"><Period/></MPD>'
+        response = self.client.get('/channel/1')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ET.fromstring(response.data).get('publishTime'), 'revalidated')
+        self.assertEqual(self.client.get(path).data, b'0123456789')
+        self.assertEqual(self.stream_info.call_count, 1)
+
+    def test_idle_candidate_survives_restart_without_renewing_its_expiration(self):
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        path = self.segment_path()
+        self.now += 3600
+        self.wall += 3600
+        with self.app.app_context():
+            proxy._persist_sessions(force=True)
+        self.restart_cache()
+        self.assertEqual(proxy.session_counts()['valid_sessions'], 0)
+        self.assertEqual(self.client.get(path).status_code, 410)
+        self.stream_info.reset_mock()
+        self.assertEqual(self.segment_path(), path)
+        self.stream_info.assert_not_called()
+
+    def test_candidates_older_than_retention_are_not_restored(self):
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        self.segment_path()
+        self.wall += proxy.STALE_SESSION_RETENTION_SECONDS + 1801
+        self.restart_cache()
+        self.assertFalse(proxy.SEGMENT_SESSIONS)
+        self.assertFalse(proxy.CHANNEL_SESSIONS)
 
     def test_nested_absolute_base_url_stays_on_proxy(self):
         type(self).manifest = f'<MPD><Period><BaseURL>{self.cdn}/video/</BaseURL><AdaptationSet><SegmentTemplate media="fragment.m4s"/></AdaptationSet></Period></MPD>'
@@ -362,8 +395,8 @@ class DashProxyTests(unittest.TestCase):
         self.now += 100
         self.assertEqual(self.client.get(path).status_code, 410)
         self.stream_info.reset_mock()
-        self.assertNotEqual(self.segment_path(), path)
-        self.stream_info.assert_called_once()
+        self.assertEqual(self.segment_path(), path)
+        self.stream_info.assert_not_called()
 
     def test_segment_activity_is_saved_without_writing_every_fragment(self):
         proxy.init_session_cache(self.app, self.cache_path, self.cache_context)

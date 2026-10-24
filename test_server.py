@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import requests
 
-from magiogo import MagioGo, MagioGoException, NetConnectionError, UserInvalidException
+from magiogo import ApiCooldownError, MagioGo, MagioGoException, NetConnectionError, UserInvalidException
 
 
 class StartupTests(unittest.TestCase):
@@ -127,6 +127,32 @@ class MagioRequestTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.client = MagioGo(self.directory.name, 'test', 'test')
+
+    def test_playback_does_not_wait_behind_a_long_rate_limit_or_auth_lock(self):
+        self.client._api_next_request = time.monotonic() + 60
+        with self.client._auth_lock, patch.object(self.client, '_request') as request:
+            with self.assertRaises(ApiCooldownError) as error:
+                self.client.channel_stream_info('1')
+        self.assertGreaterEqual(error.exception.retry_after, 59)
+        request.assert_not_called()
+
+    def test_playback_rate_limit_returns_without_retrying_or_shortening_cooldown(self):
+        session = MagicMock()
+        session.__enter__.return_value = session
+        response = MagioAuthTests.reply((429, {}))
+        response.headers['Retry-After'] = '60'
+        for method in ('get', 'post'):
+            with self.subTest(method=method):
+                self.client._api_next_request = 0
+                getattr(session, method).return_value = response
+                getattr(session, method).reset_mock()
+                with patch.object(self.client, '_request', return_value=session), patch('magiogo.time.monotonic', return_value=100):
+                    with self.assertRaises(ApiCooldownError) as error:
+                        getattr(self.client, '_' + method)('https://api.test', max_wait=5)
+                self.assertEqual(error.exception.retry_after, 60)
+                self.assertEqual(self.client._api_next_request, 160)
+                self.assertEqual(getattr(session, method).call_count, 1)
+                self.assertEqual(self.client._api_foreground, 0)
 
     def test_api_timeouts_are_bounded_and_reported_as_network_errors(self):
         for method in ('get', 'post'):
@@ -314,7 +340,7 @@ class MagioRequestTests(unittest.TestCase):
     def test_simultaneous_login_does_not_register_two_devices(self):
         entered, release = threading.Event(), threading.Event()
 
-        def login():
+        def login(max_wait=None):
             entered.set()
             release.wait(2)
             return {'success': True, 'token': {'accessToken': 'saved', 'refreshToken': 'refresh', 'type': 'Bearer', 'expiresIn': int((time.time() + 3600) * 1000)}}

@@ -123,12 +123,29 @@ belong to that worker. Shutdown cancels queued API work and saves CDN sessions b
 Gunicorn allows up to eight seconds to drain requests; Compose gives the container 15 seconds to stop.
 The Flask command remains available for local development on Windows.
 
+Idle DASH sessions expire after 30 minutes. Their private CDN URL and cookies are kept for another
+24 hours as candidates: opening the channel first fetches a current manifest from CDN, and only
+contacts Magio if that fails. Expired candidates cannot serve segments until revalidated.
+If Magio requests a cooldown longer than five seconds, playback returns `503` with `Retry-After`
+instead of holding the HTTP request open beyond Threadfin's startup timeout. Guide refreshes
+continue to respect the full upstream cooldown.
+
 ### Docker
 ```shell script
 docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=your_password --env MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000 --env MAGIO_GUIDE_DAYS=7 --env MAGIO_GUIDE_REFRESH_HOURS=12 --env MAGIO_DEVICE_TYPE=OTT_STB --env MAGIO_DEVICE_NAME="Magio IPTV Server" --name magiogo-iptv-server cvb941/magiogo-iptv-server
 ```
 
 ### Docker Compose
+The image runs as UID/GID `10001:10001`. Create writable bind mounts before starting it;
+for existing installations, stop the service and adjust ownership of the two mounted directories.
+Session files should remain private (`0600`, with the storage directory `0700`).
+
+```shell
+mkdir -p storage public
+sudo chown -R 10001:10001 storage public
+sudo chmod 700 storage
+```
+
 ```yaml
 version: '3'
 services:
@@ -149,6 +166,7 @@ services:
             - MAGIO_DEVICE_TYPE=OTT_STB
             - MAGIO_DEVICE_NAME=Magio IPTV Server
         container_name: magiogo-iptv-server
+        stop_grace_period: 15s
 ```
 
 ### Threadfin
@@ -159,6 +177,28 @@ resample audio to avoid repeated audio timestamps when the live DASH manifest up
 ```text
 -hide_banner -loglevel info -analyzeduration 1000000 -probesize 1000000 -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 2 -rw_timeout 15000000 -i [URL] -sn -dn -c:v copy -c:a aac -b:a 192k -af aresample=async=1:first_pts=0 -f mpegts pipe:1
 ```
+
+### Tests
+
+CI tests Python 3.11 and 3.14, and runs the complete suite as the application user in the
+production Alpine environment with external networking disabled. The Docker test target adds
+FFmpeg to verify actual audio/video decoding through Gunicorn, CDN cookies and redirects,
+and a backend restart with restored sessions. The production image does not include FFmpeg.
+
+```shell
+docker build --target test -t magio-test .
+docker run --rm --network none magio-test
+```
+
+To verify an installed Threadfin, run this on its Docker host with no other active streams:
+
+```shell
+python3 tools/threadfin_smoke.py --playlist /path/to/threadfin.m3u --channel "Jednotka HD" --backend-url http://127.0.0.1:5678
+```
+
+This restarts the backend container while reading the same Threadfin HTTP connection and
+decoding its video and audio. It checks continued playback, retained FFmpeg process,
+restored CDN sessions and no new Magio API requests. It prints timings without signed URLs or cookies.
 
 ## Season parsing included
 EPG data for shows from Magio GO contains episode numbers, but for some reason, the season

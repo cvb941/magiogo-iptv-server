@@ -6,6 +6,7 @@ import json
 import threading
 import logging
 import copy
+import math
 from contextlib import contextmanager
 from concurrent.futures import CancelledError
 
@@ -28,6 +29,12 @@ class MagioGoException(Exception):
     def __init__(self, id, text):
         self.id = id
         self.text = text
+
+
+class ApiCooldownError(NetConnectionError):
+    def __init__(self, seconds):
+        self.retry_after = max(1, math.ceil(seconds))
+        super().__init__('Magio API is temporarily unavailable')
 
 
 class MagioGoSessionData:
@@ -156,7 +163,7 @@ class MagioGo(IPTVClient):
         return session
 
     @contextmanager
-    def _api_slot(self, background=False):
+    def _api_slot(self, background=False, max_wait=None):
         with self._api_condition:
             if not background:
                 self._api_foreground += 1
@@ -174,6 +181,8 @@ class MagioGo(IPTVClient):
                             continue
                     if delay <= 0:
                         break
+                    if max_wait is not None and delay > max_wait:
+                        raise ApiCooldownError(delay)
                     self._api_condition.wait(delay)
                 now = time.monotonic()
                 self._api_next_request = now + 1
@@ -208,13 +217,16 @@ class MagioGo(IPTVClient):
         logging.getLogger(__name__).warning('Magio API returned %s; next request in %.1fs', response.status_code, delay)
         return True
 
-    def _get(self, url, params=None, background=False, **kwargs):
+    def _get(self, url, params=None, background=False, max_wait=None, **kwargs):
         kwargs.setdefault('timeout', (5, 15))
         try:
             with self._request() as session:
                 for attempt in range(3):
-                    with self._api_slot(background), session.get(url, params=params, **kwargs) as response:
-                        if self._apply_api_cooldown(response, attempt) and attempt < 2:
+                    with self._api_slot(background, max_wait), session.get(url, params=params, **kwargs) as response:
+                        retry = self._apply_api_cooldown(response, attempt)
+                        if retry and max_wait is not None and self._api_next_request - time.monotonic() > max_wait:
+                            raise ApiCooldownError(self._api_next_request - time.monotonic())
+                        if retry and attempt < 2:
                             continue
                         response.raise_for_status()
                         resp = response.json()
@@ -226,12 +238,14 @@ class MagioGo(IPTVClient):
                 self.diagnostics.record('api_errors', error_type=type(err).__name__)
             raise NetConnectionError(str(err))
 
-    def _post(self, url, data=None, json=None, **kwargs):
+    def _post(self, url, data=None, json=None, max_wait=None, **kwargs):
         kwargs.setdefault('timeout', (5, 15))
         try:
-            with self._api_slot(), self._request() as session:
+            with self._api_slot(max_wait=max_wait), self._request() as session:
                 with session.post(url, data=data, json=json, **kwargs) as response:
                     self._apply_api_cooldown(response)
+                    if max_wait is not None and response.status_code in (429, 503):
+                        raise ApiCooldownError(self._api_next_request - time.monotonic())
                     response.raise_for_status()
                     resp = response.json()
             self._check_response(resp)
@@ -241,10 +255,11 @@ class MagioGo(IPTVClient):
                 self.diagnostics.record('api_errors', error_type=type(err).__name__)
             raise NetConnectionError(str(err)) from err
 
-    def _init_and_login(self):
+    def _init_and_login(self, max_wait=None):
         # INIT: register this "device"
         initialized = self._post(
             'https://skgo.magio.tv/v2/auth/init',
+            max_wait=max_wait,
                 params={
                     'dsid': f"Netscape.{int(time.time())}.{random.random()}",
                     'deviceName': self._device,
@@ -271,6 +286,7 @@ class MagioGo(IPTVClient):
         temporary = self._token_session(initialized, authenticated=False)
         return self._post(
             'https://skgo.magio.tv/v2/auth/login',
+            max_wait=max_wait,
             data=login_body,
             headers={
                 **self._auth_headers(temporary),
@@ -278,7 +294,9 @@ class MagioGo(IPTVClient):
             }
         )
 
-    def _login(self):
+    def _login(self, max_wait=None):
+        if max_wait is not None and self._api_next_request - time.monotonic() > max_wait:
+            raise ApiCooldownError(self._api_next_request - time.monotonic())
         with self._auth_lock:
             if not self._user_name or not self._password:
                 raise UserNotDefinedException
@@ -293,6 +311,7 @@ class MagioGo(IPTVClient):
                     try:
                         response = self._post(
                             'https://skgo.magio.tv/v2/auth/tokens',
+                            max_wait=max_wait,
                             json={'refreshToken': saved.refresh_token},
                             headers=self._auth_headers(saved)
                         )
@@ -303,9 +322,9 @@ class MagioGo(IPTVClient):
                                 raise
                         elif isinstance(error, MagioGoException) and error.id == 'RATE_LIMIT_EXCEEDED':
                             raise
-                        response = self._init_and_login()
+                        response = self._init_and_login(max_wait=max_wait)
                 else:
-                    response = self._init_and_login()
+                    response = self._init_and_login(max_wait=max_wait)
                 candidate = self._token_session(response, saved)
                 candidate.authenticated_at = time.time()
                 self._store_session(candidate)
@@ -335,7 +354,7 @@ class MagioGo(IPTVClient):
         return ret
 
     def channel_stream_info(self, channel_id, programme_id=None, quality_override=None):
-        self._login()
+        self._login(max_wait=5)
         requested = quality_override or self._quality
         cache_key = json.dumps([self._deviceType, self._device, requested, str(channel_id)])
         with self._auth_lock:
@@ -345,6 +364,7 @@ class MagioGo(IPTVClient):
         qualities = [quality] if quality == MagioQuality.medium else [quality, MagioQuality.medium]
         for quality in qualities:
             resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
+                         max_wait=5,
                          params={'service': 'LIVE',
                                  'name': self._device,
                                  'devtype': self._deviceType,

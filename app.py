@@ -86,6 +86,13 @@ def channel_redirect(channel_id):
     return proxy_manifest(lambda: magio.channel_stream_info(channel_id), magio_iptv_server_public_url, channel_id)
 
 
+@app.errorhandler(ApiCooldownError)
+def api_cooldown(error):
+    return {'error': 'upstream_unavailable', 'retry_after': error.retry_after}, 503, {
+        'Retry-After': str(error.retry_after), 'Cache-Control': 'no-store',
+    }
+
+
 @app.errorhandler(404)
 def page_not_found(e):
     # Redirect all to index page
