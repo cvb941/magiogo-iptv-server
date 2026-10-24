@@ -1,3 +1,4 @@
+import atexit
 import threading
 import time
 import uuid
@@ -15,6 +16,16 @@ SEGMENT_SESSIONS_LOCK = threading.Lock()
 SEGMENT_SESSION_TTL_SECONDS = 30 * 60
 CHANNEL_SESSIONS = {}
 CHANNEL_LOCKS = {}
+CDN_ADAPTER = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16)
+atexit.register(CDN_ADAPTER.close)
+
+
+class _CDNSession(requests.Session):
+    def get_adapter(self, url):
+        # Borrow the shared pool without sharing cookies or closing it with this session.
+        if url.lower().startswith(('http://', 'https://')):
+            return CDN_ADAPTER
+        return super().get_adapter(url)
 
 
 def _rewrite_manifest(content, manifest_url, proxy_base, origins):
@@ -102,7 +113,7 @@ def _fetch_manifest(stream_info, public_url, key):
         sid, origins = uuid.uuid4().hex, []
 
     try:
-        with requests.Session() as session:
+        with _CDNSession() as session:
             if cached:
                 session.cookies.update(cached['cookies'])
             with session.get(url, headers={'User-Agent': user_agent}, timeout=10) as upstream:
@@ -159,7 +170,8 @@ def segment_proxy(sid, origin_id, subpath):
     headers = {'User-Agent': session_info['user_agent'], 'Accept-Encoding': 'identity'}
     headers.update((name, request.headers[name]) for name in ('Range', 'If-Range') if name in request.headers)
     try:
-        upstream = requests.get(target_url, cookies=session_info['cookies'], headers=headers, stream=True, timeout=15)
+        with _CDNSession() as session:
+            upstream = session.get(target_url, cookies=session_info['cookies'], headers=headers, stream=True, timeout=15)
     except requests.RequestException:
         abort(502)
 

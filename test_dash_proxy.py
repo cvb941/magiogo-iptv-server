@@ -17,16 +17,29 @@ class DashProxyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         class CDN(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+
+            def handle(self):
+                try:
+                    super().handle()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
             def do_GET(self):
                 cls.requests.append((self.path, self.headers))
+                cls.connections.append(self.client_address)
                 if self.path == '/start.mpd':
                     self.send_response(302)
                     self.send_header('Location', '/live/manifest.mpd')
+                    self.send_header('Content-Length', '0')
                     self.end_headers()
                     return
                 if self.path == '/live/manifest.mpd':
                     status, body = 200, cls.manifest.encode()
                     headers = {'Content-Type': 'application/dash+xml', 'Set-Cookie': 'CDNAuth=ok; Path=/'}
+                elif self.path == '/cookies':
+                    status, body = 200, self.headers.get('Cookie', '').encode()
+                    headers = {'Set-Cookie': 'private=first; Path=/'}
                 elif self.headers.get('Cookie') != 'CDNAuth=ok':
                     status, body, headers = 403, b'', {}
                 elif self.headers.get('Range') == 'bytes=2-5':
@@ -34,12 +47,19 @@ class DashProxyTests(unittest.TestCase):
                     headers = {'Content-Type': 'video/mp4', 'Content-Range': 'bytes 2-5/10', 'Accept-Ranges': 'bytes', 'ETag': '"segment"'}
                 else:
                     status, body, headers = 200, b'0123456789', {'Content-Type': 'video/mp4'}
+                    if self.path == '/live/large.m4s':
+                        body = b'x' * 262144
+                    elif self.path == '/live/close.m4s':
+                        headers['Connection'] = 'close'
                 self.send_response(status)
                 for name, value in headers.items():
                     self.send_header(name, value)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
             def log_message(self, *_):
                 pass
@@ -51,12 +71,14 @@ class DashProxyTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        proxy.CDN_ADAPTER.close()
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join()
 
     def setUp(self):
         type(self).requests = []
+        type(self).connections = []
         type(self).manifest = '<MPD><Period><AdaptationSet><SegmentTemplate media="fragment.m4s"/></AdaptationSet></Period></MPD>'
         proxy.SEGMENT_SESSIONS.clear()
         proxy.CHANNEL_SESSIONS.clear()
@@ -93,6 +115,45 @@ class DashProxyTests(unittest.TestCase):
         self.assertEqual(upstream_path, '/live/fragment.m4s')
         self.assertEqual(headers['Cookie'], 'CDNAuth=ok')
         self.assertEqual(headers['User-Agent'], 'Magio review')
+
+    def test_manifest_and_segments_reuse_one_cdn_connection(self):
+        path = self.segment_path()
+        for _ in range(3):
+            self.assertEqual(self.client.get(path).data, b'0123456789')
+        self.assertEqual(len(set(self.connections)), 1)
+
+    def test_pooled_connections_do_not_share_request_cookies(self):
+        for channel in ('first', 'second'):
+            with proxy._CDNSession() as session:
+                with session.get(self.cdn + '/cookies', cookies={'channel': channel}, timeout=2) as response:
+                    self.assertEqual(response.text, 'channel=' + channel)
+        self.assertEqual(len(set(self.connections)), 1)
+
+    def test_parallel_requests_keep_their_own_cookies(self):
+        def request_cookie(channel):
+            with proxy._CDNSession() as session:
+                with session.get(self.cdn + '/cookies', cookies={'channel': channel}, timeout=2) as response:
+                    return response.text
+
+        channels = ['first', 'second'] * 4
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(request_cookie, channels))
+        self.assertEqual(results, ['channel=' + channel for channel in channels])
+
+    def test_closed_cdn_connection_is_replaced(self):
+        path = self.segment_path()
+        self.assertEqual(self.client.get(path.replace('fragment.m4s', 'close.m4s')).data, b'0123456789')
+        previous = self.connections[-1]
+        self.assertEqual(self.client.get(path).data, b'0123456789')
+        self.assertNotEqual(previous, self.connections[-1])
+
+    def test_aborted_stream_does_not_reuse_unread_cdn_bytes(self):
+        path = self.segment_path()
+        response = self.client.get(path.replace('fragment.m4s', 'large.m4s'), buffered=False)
+        response.close()
+        previous = self.connections[-1]
+        self.assertEqual(self.client.get(path).data, b'0123456789')
+        self.assertNotEqual(previous, self.connections[-1])
 
     def test_byte_ranges_and_response_headers_are_preserved(self):
         response = self.client.get(self.segment_path(), headers={'Range': 'bytes=2-5', 'If-Range': '"segment"'})
@@ -214,14 +275,14 @@ class DashProxyTests(unittest.TestCase):
 
     def test_upstream_failure_returns_bad_gateway(self):
         path = self.segment_path()
-        with patch.object(proxy.requests, 'get', side_effect=requests.ConnectionError):
+        with patch.object(proxy._CDNSession, 'get', side_effect=requests.ConnectionError):
             self.assertEqual(self.client.get(path).status_code, 502)
 
     def test_disconnect_closes_upstream_response(self):
         path = self.segment_path()
         upstream = Mock(status_code=200, headers={'Content-Type': 'video/mp4'})
         upstream.iter_content.return_value = iter((b'first chunk', b'second chunk'))
-        with patch.object(proxy.requests, 'get', return_value=upstream):
+        with patch.object(proxy._CDNSession, 'get', return_value=upstream):
             response = self.client.get(path, buffered=False)
             response.close()
         upstream.close.assert_called()
