@@ -7,6 +7,7 @@ import threading
 import logging
 import copy
 from contextlib import contextmanager
+from concurrent.futures import CancelledError
 
 try:
     from typing import List
@@ -76,6 +77,7 @@ class MagioGo(IPTVClient):
         self._data = MagioGoSessionData()
         self.diagnostics = Diagnostics()
         self._auth_lock = threading.Lock()
+        self._stop_event = threading.Event()
         self._api_condition = threading.Condition()
         self._api_foreground = 0
         self._api_next_request = 0
@@ -162,6 +164,8 @@ class MagioGo(IPTVClient):
         try:
             with self._api_condition:
                 while True:
+                    if self._stop_event.is_set():
+                        raise CancelledError()
                     delay = self._api_next_request - time.monotonic()
                     if background:
                         delay = max(delay, self._api_background_after - time.monotonic())
@@ -181,6 +185,11 @@ class MagioGo(IPTVClient):
                 if not background:
                     self._api_foreground -= 1
                 self._api_condition.notify_all()
+
+    def stop(self):
+        self._stop_event.set()
+        with self._api_condition:
+            self._api_condition.notify_all()
 
     def _apply_api_cooldown(self, response, attempt=0):
         if response.status_code >= 400:

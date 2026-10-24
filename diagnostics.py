@@ -1,6 +1,7 @@
 import threading
 import time
 from contextlib import contextmanager
+from concurrent.futures import CancelledError
 from datetime import datetime, timezone
 
 
@@ -38,6 +39,8 @@ class Diagnostics:
             self._running.add(name)
         try:
             yield
+        except CancelledError:
+            raise
         except Exception as error:
             self.record(name + '_failures', error_type=type(error).__name__)
             raise

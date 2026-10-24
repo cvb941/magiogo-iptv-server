@@ -17,3 +17,4 @@ services:
             - MAGIO_DEVICE_TYPE=OTT_STB
             - MAGIO_DEVICE_NAME=Magio IPTV Server
         container_name: magiogo-iptv-server
+        stop_grace_period: 15s

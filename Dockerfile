@@ -18,4 +18,4 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD ["python", "-c", "import http.client,json,sys; c=http.client.HTTPConnection('127.0.0.1',5000,timeout=2); c.request('GET','/health'); r=c.getresponse(); sys.exit(r.status!=200 or json.load(r).get('status')!='ok')"]
-CMD ["flask", "run", "--host", "0.0.0.0"]
+CMD ["gunicorn", "--config", "gunicorn.conf.py", "app:app"]

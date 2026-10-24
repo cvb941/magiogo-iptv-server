@@ -4,6 +4,8 @@ import gzip
 import os
 import sys
 import time
+import threading
+from concurrent.futures import CancelledError
 from pathlib import Path
 
 import xmltv
@@ -11,7 +13,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, redirect, render_template
 from tqdm import tqdm
 
-from dash_proxy import dash_proxy, init_session_cache, proxy_manifest, session_counts
+from dash_proxy import dash_proxy, init_session_cache, proxy_manifest, session_counts, _persist_sessions
 from diagnostics import Diagnostics, utc_time
 from magiogo import *
 from parse_season_number import parse_season_number
@@ -25,6 +27,7 @@ app.register_blueprint(dash_proxy)
 Path("public").mkdir(exist_ok=True)
 
 last_refresh = None
+shutdown_started = threading.Event()
 
 
 @app.route('/')
@@ -181,9 +184,22 @@ def refresh():
             print("Refreshing finished!")
             global last_refresh
             last_refresh = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    except CancelledError:
+        pass
     except Exception:
         app.logger.exception("Guide refresh failed; retrying in 5 minutes")
         scheduler.modify_job('guide-refresh', next_run_time=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=5))
+
+
+def shutdown():
+    if shutdown_started.is_set():
+        return
+    shutdown_started.set()
+    magio.stop()
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+    with app.app_context():
+        _persist_sessions(force=True)
 
 
 # Quality config
@@ -221,4 +237,4 @@ scheduler.add_job(refresh, 'interval', id='guide-refresh',
                   hours=refresh_hours, next_run_time=next_refresh,
                   max_instances=1, coalesce=True)
 scheduler.start()
-atexit.register(lambda: scheduler.shutdown(wait=False))
+atexit.register(shutdown)

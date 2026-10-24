@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -140,6 +140,27 @@ class MagioRequestTests(unittest.TestCase):
                 self.assertEqual(getattr(session, method).call_args.kwargs['timeout'], (5, 15))
                 session.__exit__.assert_called()
         self.assertEqual(self.client.diagnostics.snapshot()['counters']['api_errors'], 2)
+
+    def test_shutdown_interrupts_api_cooldown_without_sending_a_request(self):
+        waiting = threading.Event()
+        wait = self.client._api_condition.wait
+        self.client._api_next_request = time.monotonic() + 3600
+
+        def waiting_for_slot(timeout=None):
+            waiting.set()
+            return wait(timeout)
+
+        with patch.object(self.client._api_condition, 'wait', side_effect=waiting_for_slot), patch.object(self.client, '_request') as request, ThreadPoolExecutor(1) as pool:
+            future = pool.submit(self.client._get, 'https://api.test')
+            try:
+                self.assertTrue(waiting.wait(1))
+            finally:
+                self.client.stop()
+            with self.assertRaises(CancelledError):
+                future.result(1)
+            request.return_value.__enter__.return_value.get.assert_not_called()
+        self.assertEqual(self.client._api_foreground, 0)
+        self.assertEqual(self.client.diagnostics.snapshot()['counters']['api_requests'], 0)
 
     def test_guide_requests_are_spaced_across_pages_and_days(self):
         elapsed = [0]

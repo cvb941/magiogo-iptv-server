@@ -5,7 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -40,7 +40,8 @@ def diagnostic_app():
                 yield module
         finally:
             if module is not None:
-                module.scheduler.shutdown()
+                if module.scheduler.running:
+                    module.scheduler.shutdown()
             sys.modules.pop('app', None)
             if previous_app is not None:
                 sys.modules['app'] = previous_app
@@ -78,6 +79,23 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(snapshot['last']['guide_failures']['error_type'], 'RuntimeError')
         self.assertNotIn('private-token', json.dumps(snapshot))
         self.assertNotIn('secret-cookie', json.dumps(snapshot))
+
+    def test_expected_shutdown_is_not_reported_as_a_failed_guide_refresh(self):
+        metrics = Diagnostics()
+        with self.assertRaises(CancelledError):
+            with metrics.operation('guide'):
+                raise CancelledError()
+        self.assertEqual(metrics.snapshot()['counters']['guide_failures'], 0)
+        self.assertEqual(metrics.snapshot()['running'], [])
+
+    def test_shutdown_flushes_cache_and_stops_scheduler_once(self):
+        with diagnostic_app() as module:
+            with patch.object(module.magio, 'stop', wraps=module.magio.stop) as stop:
+                module.shutdown()
+                module.shutdown()
+            stop.assert_called_once()
+            self.assertFalse(module.scheduler.running)
+            self.assertTrue(Path('storage/dash-sessions.json').exists())
 
     def test_health_and_status_are_local_and_do_not_change_api_counters(self):
         with diagnostic_app() as module:
