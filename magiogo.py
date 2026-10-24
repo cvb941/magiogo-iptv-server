@@ -4,6 +4,7 @@ import time
 import requests
 import json
 import threading
+from contextlib import contextmanager
 
 try:
     from typing import List
@@ -31,6 +32,7 @@ class MagioGoSessionData:
         self.refresh_token = ''
         self.expires_in = 0
         self.type = ''
+        self.stream_qualities = {}
 
 
 class MagioGoDevice:
@@ -69,6 +71,10 @@ class MagioGo(IPTVClient):
         self._appVersion = '4.1.1' if self._deviceType == 'OTT_ANDROID' else '0.0.0'
         self._data = MagioGoSessionData()
         self._auth_lock = threading.Lock()
+        self._api_condition = threading.Condition()
+        self._api_foreground = 0
+        self._api_next_request = 0
+        self._api_background_after = time.monotonic() + 2
         super().__init__(storage_dir, '%s.session' % self._user_name)
 
     def _check_response(self, resp):
@@ -104,18 +110,56 @@ class MagioGo(IPTVClient):
     def _request():
         session = requests.Session()
         session.mount('https://', HTTPAdapter(max_retries=Retry(
-            total=2, backoff_factor=1, backoff_max=5, retry_after_max=10,
-            status_forcelist=[429, 500, 502, 503, 504],
+            total=2, status=0, backoff_factor=1, backoff_max=5,
+            respect_retry_after_header=False, raise_on_status=False,
         )))
         return session
 
-    def _get(self, url, params=None, **kwargs):
+    @contextmanager
+    def _api_slot(self, background=False):
+        with self._api_condition:
+            if not background:
+                self._api_foreground += 1
+                self._api_condition.notify_all()
+        try:
+            with self._api_condition:
+                while True:
+                    delay = self._api_next_request - time.monotonic()
+                    if background:
+                        delay = max(delay, self._api_background_after - time.monotonic())
+                        if self._api_foreground:
+                            self._api_condition.wait()
+                            continue
+                    if delay <= 0:
+                        break
+                    self._api_condition.wait(delay)
+                now = time.monotonic()
+                self._api_next_request = now + 1
+                self._api_background_after = now + 2
+            yield
+        finally:
+            with self._api_condition:
+                if not background:
+                    self._api_foreground -= 1
+                self._api_condition.notify_all()
+
+    def _get(self, url, params=None, background=False, **kwargs):
         kwargs.setdefault('timeout', (5, 15))
         try:
             with self._request() as session:
-                with session.get(url, params=params, **kwargs) as response:
-                    response.raise_for_status()
-                    resp = response.json()
+                for attempt in range(3):
+                    with self._api_slot(background), session.get(url, params=params, **kwargs) as response:
+                        if response.status_code in (429, 500, 502, 503, 504):
+                            delay = Retry(retry_after_max=10).get_retry_after(response)
+                            delay = delay if delay is not None else min(2 ** (attempt + 1), 5)
+                            with self._api_condition:
+                                self._api_next_request = max(self._api_next_request, time.monotonic() + delay)
+                                self._api_condition.notify_all()
+                            if attempt < 2:
+                                continue
+                        response.raise_for_status()
+                        resp = response.json()
+                        break
             self._check_response(resp)
             return resp
         except requests.RequestException as err:
@@ -124,7 +168,7 @@ class MagioGo(IPTVClient):
     def _post(self, url, data=None, json=None, **kwargs):
         kwargs.setdefault('timeout', (5, 15))
         try:
-            with self._request() as session:
+            with self._api_slot(), self._request() as session:
                 with session.post(url, data=data, json=json, **kwargs) as response:
                     response.raise_for_status()
                     resp = response.json()
@@ -213,8 +257,15 @@ class MagioGo(IPTVClient):
 
     def channel_stream_info(self, channel_id, programme_id=None, quality_override=None):
         self._login()
-        quality = quality_override or self._quality
-        resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
+        requested = quality_override or self._quality
+        cache_key = json.dumps([self._deviceType, self._device, requested, str(channel_id)])
+        with self._auth_lock:
+            cached = self._data.stream_qualities.get(cache_key, {})
+            cache_valid = cached.get('quality') == MagioQuality.medium and cached.get('expires', 0) > time.time()
+            quality = MagioQuality.medium if cache_valid else requested
+        qualities = [quality] if quality == MagioQuality.medium else [quality, MagioQuality.medium]
+        for quality in qualities:
+            resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
                          params={'service': 'LIVE',
                                  'name': self._device,
                                  'devtype': self._deviceType,
@@ -223,25 +274,38 @@ class MagioGo(IPTVClient):
                                  'ecid': '',
                                  'drm': 'verimatrix'},
                          headers=self._auth_headers())
-        si = StreamInfo()
-        si.url = resp['url']
-        si.manifest_type = 'mpd' if si.url.find('.mpd') > 0 else 'm3u'
-        si.user_agent = UA
+            si = StreamInfo()
+            si.url = resp['url']
+            si.manifest_type = 'mpd' if si.url.find('.mpd') > 0 else 'm3u'
+            si.user_agent = UA
+            if requested == MagioQuality.medium:
+                return si
 
-        # Some channels, such as Filmbox Europe HD, seem to have only p0, p1, p2 qualities
-        # Check if url is valid (does not return 404), and fallback to p2 quality
-        if quality != MagioQuality.medium:
+            # Confirm a fallback before remembering it; a single CDN 404 can be transient.
             for attempt in range(2):
                 with requests.get(si.url, headers={'User-Agent': si.user_agent}, stream=True, timeout=(5, 15)) as response:
-                    missing = response.status_code == 404
-                if not missing:
+                    status = response.status_code
+                if status != 404:
                     break
                 if attempt == 0:
                     time.sleep(.5)
-            if missing:
-                return self.channel_stream_info(channel_id, programme_id, MagioQuality.medium)
-
-        return si
+            if quality != MagioQuality.medium and status == 404:
+                continue
+            with self._auth_lock:
+                if quality != requested or cache_key in self._data.stream_qualities:
+                    self._data.stream_qualities.pop(cache_key, None)
+                    if quality != requested and 200 <= status < 300:
+                        self._data.stream_qualities = {key: value for key, value in self._data.stream_qualities.items()
+                                                       if value.get('expires', 0) > time.time()}
+                        expires = cached['expires'] if cache_valid else time.time() + 3600
+                        self._data.stream_qualities[cache_key] = {'quality': quality, 'expires': expires}
+                    try:
+                        self._store_session(self._data)
+                    except OSError:
+                        pass  # This optional cache must not interrupt playback.
+            if quality != requested and status == 404 and quality == qualities[0]:
+                return self.channel_stream_info(channel_id, programme_id, requested)
+            return si
 
     def programme_stream_info(self, programme_id):
         self._login()
@@ -291,11 +355,9 @@ class MagioGo(IPTVClient):
             fetch_more = True
             offset = 0
             while fetch_more:
-                # Leave API capacity for playback, including between guide days.
-                time.sleep(2)
                 resp = self._get('https://skgo.magio.tv/v2/television/epg',
                                  params={'filter': filter, 'limit': '20', 'offset': offset * 20, 'list': 'LIVE'},
-                                 headers=self._auth_headers())
+                                 headers=self._auth_headers(), background=True)
 
                 fetch_more = len(resp['items']) == 20
                 offset = offset + 1

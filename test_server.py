@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -85,20 +86,115 @@ class MagioRequestTests(unittest.TestCase):
     def test_guide_requests_are_spaced_across_pages_and_days(self):
         elapsed = [0]
         requested_at = []
-        pages = iter(({'items': [{'programs': []}] * 20}, {'items': []}, {'items': []}))
+        pages = iter(({'success': True, 'items': [{'programs': []}] * 20},
+                      {'success': True, 'items': []}, {'success': True, 'items': []}))
+        session = MagicMock()
+        session.__enter__.return_value = session
+        self.client._api_background_after = 2
 
         def sleep(seconds):
             elapsed[0] += seconds
 
         def get(*args, **kwargs):
             requested_at.append(elapsed[0])
-            return next(pages)
+            response = MagicMock(status_code=200)
+            response.json.return_value = next(pages)
+            response.__enter__.return_value = response
+            return response
 
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=get), patch('magiogo.time.sleep', side_effect=sleep):
+        session.get.side_effect = get
+        with patch.object(self.client, '_login'), patch.object(self.client, '_request', return_value=session), patch('magiogo.time.monotonic', side_effect=lambda: elapsed[0]), patch.object(self.client._api_condition, 'wait', side_effect=sleep):
             self.client.epg([], datetime(2026, 1, 1), datetime(2026, 1, 2))
         self.assertEqual(len(requested_at), 3)
         self.assertGreaterEqual(requested_at[0], 2)
         self.assertTrue(all(second - first >= 2 for first, second in zip(requested_at, requested_at[1:])))
+
+    def test_playback_overtakes_waiting_guide_requests(self):
+        waiting, playback, release = threading.Event(), threading.Event(), threading.Event()
+        order = []
+        session = MagicMock()
+        session.__enter__.return_value = session
+        wait = self.client._api_condition.wait
+        self.client._api_next_request = time.monotonic() + .1
+        self.client._api_background_after = self.client._api_next_request
+
+        def get(url, **kwargs):
+            order.append(url)
+            if url == 'playback':
+                playback.set()
+                release.wait(3)
+            response = MagicMock(status_code=200)
+            response.__enter__.return_value = response
+            response.json.return_value = {'success': True}
+            return response
+
+        def waiting_for_slot(timeout=None):
+            waiting.set()
+            return wait(timeout)
+
+        session.get.side_effect = get
+        with patch.object(self.client, '_request', return_value=session), patch.object(self.client._api_condition, 'wait', side_effect=waiting_for_slot), ThreadPoolExecutor(2) as pool:
+            guide = pool.submit(self.client._get, 'epg', background=True)
+            self.assertTrue(waiting.wait(1))
+            stream = pool.submit(self.client._get, 'playback')
+            try:
+                self.assertTrue(playback.wait(1))
+                self.assertEqual(order, ['playback'])
+            finally:
+                release.set()
+            stream.result(2)
+            guide.result(3)
+        self.assertEqual(order, ['playback', 'epg'])
+
+    def test_slow_guide_response_does_not_block_playback(self):
+        entered, release = threading.Event(), threading.Event()
+        session = MagicMock()
+        session.__enter__.return_value = session
+        self.client._api_background_after = 0
+
+        def get(url, **kwargs):
+            if url == 'epg':
+                entered.set()
+                release.wait(4)
+            response = MagicMock(status_code=200)
+            response.__enter__.return_value = response
+            response.json.return_value = {'success': True}
+            return response
+
+        session.get.side_effect = get
+        with patch.object(self.client, '_request', return_value=session), ThreadPoolExecutor(2) as pool:
+            guide = pool.submit(self.client._get, 'epg', background=True)
+            try:
+                self.assertTrue(entered.wait(1))
+                stream = pool.submit(self.client._get, 'playback')
+                self.assertEqual(stream.result(2), {'success': True})
+                self.assertFalse(guide.done())
+            finally:
+                release.set()
+            guide.result(1)
+
+    def test_rate_limit_cooldown_is_shared_with_other_requests(self):
+        elapsed, requested_at = [0], []
+        session = MagicMock()
+        session.__enter__.return_value = session
+        statuses = iter((429, 429, 429, 200))
+
+        def get(url, **kwargs):
+            requested_at.append(elapsed[0])
+            response = MagicMock(status_code=next(statuses), headers={'Retry-After': '4'})
+            response.__enter__.return_value = response
+            response.json.return_value = {'success': True}
+            if response.status_code == 429:
+                response.raise_for_status.side_effect = requests.HTTPError('rate limited')
+            return response
+
+        session.get.side_effect = get
+        with patch.object(self.client, '_request', return_value=session), patch('magiogo.time.monotonic', side_effect=lambda: elapsed[0]), patch.object(self.client._api_condition, 'wait', side_effect=lambda delay=None: elapsed.__setitem__(0, elapsed[0] + delay)):
+            with self.assertRaises(NetConnectionError):
+                self.client._get('playback')
+            self.client._get('another-channel')
+        self.assertEqual(requested_at, [0, 4, 8, 12])
+        self.assertEqual(self.client._api_foreground, 0)
 
     def test_simultaneous_login_does_not_register_two_devices(self):
         entered, release = threading.Event(), threading.Event()
@@ -147,3 +243,55 @@ class MagioRequestTests(unittest.TestCase):
             stream = self.client.channel_stream_info('1', quality_override='p4')
         self.assertEqual(stream.url, 'https://cdn.test/medium.mpd')
         self.assertEqual(api.call_args.kwargs['params']['prof'], 'p2')
+
+    def test_verified_fallback_survives_restart_and_expires_without_sliding(self):
+        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
+        missing.__enter__.return_value = missing
+        ready.__enter__.return_value = ready
+        self.client._data.access_token = 'saved'
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=[{'url': 'https://cdn.test/high.mpd'}, {'url': 'https://cdn.test/medium.mpd'}]), patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
+            self.client.channel_stream_info('1', quality_override='p4')
+
+        restarted = MagioGo(self.directory.name, 'test', 'test', quality='p4')
+        with patch.object(restarted, '_get', return_value={'url': 'https://cdn.test/medium.mpd'}) as api, patch('magiogo.requests.get', return_value=ready):
+            restarted.channel_stream_info('1')
+            expires = next(iter(restarted._data.stream_qualities.values()))['expires']
+            restarted.channel_stream_info('1')
+        self.assertEqual([call.kwargs['params']['prof'] for call in api.call_args_list], ['p2', 'p2'])
+        self.assertEqual(next(iter(restarted._data.stream_qualities.values()))['expires'], expires)
+        self.assertEqual(restarted._data.access_token, 'saved')
+        with patch('magiogo.time.time', return_value=expires + 1), patch.object(restarted, '_get', return_value={'url': 'https://cdn.test/high.mpd'}) as api, patch('magiogo.requests.get', return_value=ready):
+            restarted.channel_stream_info('1')
+        self.assertEqual(api.call_args.kwargs['params']['prof'], 'p4')
+        self.assertEqual(restarted._data.stream_qualities, {})
+
+    def test_failed_fallback_is_not_cached(self):
+        missing = MagicMock(status_code=404)
+        missing.__enter__.return_value = missing
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/missing.mpd'}), patch('magiogo.requests.get', return_value=missing), patch('magiogo.time.sleep'):
+            self.client.channel_stream_info('1', quality_override='p4')
+        self.assertEqual(self.client._data.stream_qualities, {})
+
+    def test_cached_fallback_is_scoped_to_channel_device_and_requested_quality(self):
+        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
+        missing.__enter__.return_value = missing
+        ready.__enter__.return_value = ready
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}), patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
+            self.client.channel_stream_info('1', quality_override='p4')
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}) as api, patch('magiogo.requests.get', return_value=ready):
+            self.client.channel_stream_info('2', quality_override='p4')
+            self.client.channel_stream_info('1', quality_override='p5')
+            self.client._deviceType = 'OTT_ANDROID'
+            self.client.channel_stream_info('1', quality_override='p4')
+        self.assertEqual([call.kwargs['params']['prof'] for call in api.call_args_list], ['p4', 'p5', 'p4'])
+
+    def test_missing_cached_fallback_rechecks_requested_quality(self):
+        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
+        missing.__enter__.return_value = missing
+        ready.__enter__.return_value = ready
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}), patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
+            self.client.channel_stream_info('1', quality_override='p4')
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}) as api, patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
+            self.client.channel_stream_info('1', quality_override='p4')
+        self.assertEqual([call.kwargs['params']['prof'] for call in api.call_args_list], ['p2', 'p4'])
+        self.assertEqual(self.client._data.stream_qualities, {})
