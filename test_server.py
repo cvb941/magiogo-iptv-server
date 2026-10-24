@@ -90,7 +90,7 @@ class MagioRequestTests(unittest.TestCase):
                       {'success': True, 'items': []}, {'success': True, 'items': []}))
         session = MagicMock()
         session.__enter__.return_value = session
-        self.client._api_background_after = 2
+        self.client._api_background_after = 6
 
         def sleep(seconds):
             elapsed[0] += seconds
@@ -106,8 +106,8 @@ class MagioRequestTests(unittest.TestCase):
         with patch.object(self.client, '_login'), patch.object(self.client, '_request', return_value=session), patch('magiogo.time.monotonic', side_effect=lambda: elapsed[0]), patch.object(self.client._api_condition, 'wait', side_effect=sleep):
             self.client.epg([], datetime(2026, 1, 1), datetime(2026, 1, 2))
         self.assertEqual(len(requested_at), 3)
-        self.assertGreaterEqual(requested_at[0], 2)
-        self.assertTrue(all(second - first >= 2 for first, second in zip(requested_at, requested_at[1:])))
+        self.assertGreaterEqual(requested_at[0], 6)
+        self.assertTrue(all(second - first >= 6 for first, second in zip(requested_at, requested_at[1:])))
 
     def test_playback_overtakes_waiting_guide_requests(self):
         waiting, playback, release = threading.Event(), threading.Event(), threading.Event()
@@ -117,6 +117,7 @@ class MagioRequestTests(unittest.TestCase):
         wait = self.client._api_condition.wait
         self.client._api_next_request = time.monotonic() + .1
         self.client._api_background_after = self.client._api_next_request
+        self.client._api_guide_interval = 2
 
         def get(url, **kwargs):
             order.append(url)
@@ -195,6 +196,27 @@ class MagioRequestTests(unittest.TestCase):
             self.client._get('another-channel')
         self.assertEqual(requested_at, [0, 4, 8, 12])
         self.assertEqual(self.client._api_foreground, 0)
+
+    def test_guide_honors_full_retry_after_and_reduces_its_request_rate(self):
+        elapsed, requested_at = [0], []
+        self.client._api_background_after = 6
+        session = MagicMock()
+        session.__enter__.return_value = session
+        statuses = iter((429, 200, 200))
+
+        def get(url, **kwargs):
+            requested_at.append(elapsed[0])
+            response = MagicMock(status_code=next(statuses), headers={'Retry-After': '60'})
+            response.__enter__.return_value = response
+            response.json.return_value = {'success': True}
+            return response
+
+        session.get.side_effect = get
+        with patch.object(self.client, '_request', return_value=session), patch('magiogo.time.monotonic', side_effect=lambda: elapsed[0]), patch.object(self.client._api_condition, 'wait', side_effect=lambda delay=None: elapsed.__setitem__(0, elapsed[0] + delay)):
+            self.client._get('epg', background=True)
+            self.client._get('epg', background=True)
+        self.assertEqual(requested_at, [6, 66, 78])
+        self.assertEqual(self.client._api_guide_interval, 12)
 
     def test_simultaneous_login_does_not_register_two_devices(self):
         entered, release = threading.Event(), threading.Event()

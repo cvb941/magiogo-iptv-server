@@ -4,6 +4,7 @@ import time
 import requests
 import json
 import threading
+import logging
 from contextlib import contextmanager
 
 try:
@@ -74,7 +75,8 @@ class MagioGo(IPTVClient):
         self._api_condition = threading.Condition()
         self._api_foreground = 0
         self._api_next_request = 0
-        self._api_background_after = time.monotonic() + 2
+        self._api_guide_interval = 6
+        self._api_background_after = time.monotonic() + self._api_guide_interval
         super().__init__(storage_dir, '%s.session' % self._user_name)
 
     def _check_response(self, resp):
@@ -135,7 +137,7 @@ class MagioGo(IPTVClient):
                     self._api_condition.wait(delay)
                 now = time.monotonic()
                 self._api_next_request = now + 1
-                self._api_background_after = now + 2
+                self._api_background_after = now + self._api_guide_interval
             yield
         finally:
             with self._api_condition:
@@ -150,11 +152,15 @@ class MagioGo(IPTVClient):
                 for attempt in range(3):
                     with self._api_slot(background), session.get(url, params=params, **kwargs) as response:
                         if response.status_code in (429, 500, 502, 503, 504):
-                            delay = Retry(retry_after_max=10).get_retry_after(response)
+                            delay = Retry().get_retry_after(response)
                             delay = delay if delay is not None else min(2 ** (attempt + 1), 5)
                             with self._api_condition:
                                 self._api_next_request = max(self._api_next_request, time.monotonic() + delay)
+                                if response.status_code == 429:
+                                    self._api_guide_interval = min(self._api_guide_interval * 2, 60)
+                                    self._api_background_after = max(self._api_background_after, self._api_next_request)
                                 self._api_condition.notify_all()
+                            logging.getLogger(__name__).warning('Magio API returned %s; next request in %.1fs', response.status_code, delay)
                             if attempt < 2:
                                 continue
                         response.raise_for_status()
