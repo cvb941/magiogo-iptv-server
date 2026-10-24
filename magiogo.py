@@ -231,8 +231,13 @@ class MagioGo(IPTVClient):
         # Some channels, such as Filmbox Europe HD, seem to have only p0, p1, p2 qualities
         # Check if url is valid (does not return 404), and fallback to p2 quality
         if quality != MagioQuality.medium:
-            with requests.get(si.url, headers={'User-Agent': si.user_agent}, stream=True, timeout=(5, 15)) as response:
-                missing = response.status_code == 404
+            for attempt in range(2):
+                with requests.get(si.url, headers={'User-Agent': si.user_agent}, stream=True, timeout=(5, 15)) as response:
+                    missing = response.status_code == 404
+                if not missing:
+                    break
+                if attempt == 0:
+                    time.sleep(.5)
             if missing:
                 return self.channel_stream_info(channel_id, programme_id, MagioQuality.medium)
 

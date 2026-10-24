@@ -130,3 +130,20 @@ class MagioRequestTests(unittest.TestCase):
         self.assertTrue(get.call_args.kwargs['stream'])
         self.assertEqual(get.call_args.kwargs['timeout'], (5, 15))
         response.__exit__.assert_called()
+
+    def test_transient_cdn_404_does_not_request_another_stream_url(self):
+        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
+        missing.__enter__.return_value = missing
+        ready.__enter__.return_value = ready
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/high.mpd'}) as api, patch('magiogo.requests.get', side_effect=[missing, ready]), patch('magiogo.time.sleep'):
+            stream = self.client.channel_stream_info('1', quality_override='p4')
+        self.assertEqual(stream.url, 'https://cdn.test/high.mpd')
+        self.assertEqual(api.call_count, 1)
+
+    def test_confirmed_cdn_404_still_falls_back_to_medium_quality(self):
+        missing = MagicMock(status_code=404)
+        missing.__enter__.return_value = missing
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=[{'url': 'https://cdn.test/high.mpd'}, {'url': 'https://cdn.test/medium.mpd'}]) as api, patch('magiogo.requests.get', return_value=missing), patch('magiogo.time.sleep'):
+            stream = self.client.channel_stream_info('1', quality_override='p4')
+        self.assertEqual(stream.url, 'https://cdn.test/medium.mpd')
+        self.assertEqual(api.call_args.kwargs['params']['prof'], 'p2')
