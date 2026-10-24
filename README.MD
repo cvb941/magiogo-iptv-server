@@ -68,6 +68,9 @@ You can also use **OTT_ANDROID** for a mobile profile.
 
 **MAGIO_DEVICE_NAME** sets the device name sent to Magio APIs. The default is Magio IPTV Server.
 
+The HTTP server starts immediately while playlist and guide updates run in the background.
+Failed updates are retried after five minutes; existing files remain available until their replacements are ready.
+
 ### Python
 ```shell script
 # install dependencies
@@ -107,6 +110,9 @@ services:
         image: cvb941/magiogo-iptv-server
         ports:
             - '5000:5000'
+        volumes:
+            - ./storage:/app/storage
+            - ./public:/app/public
         environment:
             - MAGIO_USERNAME=your_username
             - MAGIO_PASSWORD=your_password

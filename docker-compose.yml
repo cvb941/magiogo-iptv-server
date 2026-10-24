@@ -6,6 +6,7 @@ services:
             - '5000:5000'
         volumes:
             - ./storage:/app/storage
+            - ./public:/app/public
         environment:
             - MAGIO_USERNAME=your_username
             - MAGIO_PASSWORD=your_password

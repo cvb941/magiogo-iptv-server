@@ -42,17 +42,19 @@ def page_not_found(e):
 
 
 def gzip_file(file_path):
-    with open(file_path, 'rb') as src, gzip.open(f'{file_path}.gz', 'wb') as dst:
+    with open(file_path, 'rb') as src, gzip.open(f'{file_path}.gz.tmp', 'wb') as dst:
         dst.writelines(src)
+    os.replace(f'{file_path}.gz.tmp', f'{file_path}.gz')
 
 
 def generate_m3u8(channels):
     magio_iptv_server_public_url = os.environ.get('MAGIO_SERVER_PUBLIC_URL', "http://127.0.0.1:5000")
-    with open("public/magioPlaylist.m3u8", "w", encoding="utf-8") as text_file:
+    with open("public/magioPlaylist.m3u8.tmp", "w", encoding="utf-8") as text_file:
         text_file.write("#EXTM3U\n")
         for channel in tqdm(channels, total=len(channels), desc="Generating .m3u8 playlist", unit="ch", file=sys.stdout):
             text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}" tvg-logo="{channel.logo}",{channel.name}\n')
             text_file.write(f"{magio_iptv_server_public_url}/channel/{channel.id}\n")
+    os.replace("public/magioPlaylist.m3u8.tmp", "public/magioPlaylist.m3u8")
 
 
 def generate_xmltv(channels):
@@ -71,7 +73,7 @@ def generate_xmltv(channels):
 
         epg = magio.epg(channel_ids, date_from, date_to, progress=epg_progress)
         epg_progress(100)
-    with open("public/magioGuide.xmltv", "wb") as guide_file:
+    with open("public/magioGuide.xmltv.tmp", "wb") as guide_file:
         writer = xmltv.Writer(
             date=datetime.datetime.now().strftime("%Y%m%d%H%M%S"),
             generator_info_name="MagioGoIPTVServer",
@@ -116,20 +118,23 @@ def generate_xmltv(channels):
                 writer.addProgramme(programme_dict)
 
         writer.write(guide_file, True)
+    os.replace("public/magioGuide.xmltv.tmp", "public/magioGuide.xmltv")
     # Gzip the guide file
     gzip_file("public/magioGuide.xmltv")
 
 
 def refresh():
-    channels = magio.channels()
-
-    generate_m3u8(channels)
-
-    generate_xmltv(channels)
-
-    print("Refreshing finished!")
-    global last_refresh
-    last_refresh = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    try:
+        print("Refreshing playlist and XMLTV guide in the background")
+        channels = magio.channels()
+        generate_m3u8(channels)
+        generate_xmltv(channels)
+        print("Refreshing finished!")
+        global last_refresh
+        last_refresh = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        app.logger.exception("Guide refresh failed; retrying in 5 minutes")
+        scheduler.modify_job('guide-refresh', next_run_time=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=5))
 
 
 # Quality config
@@ -149,12 +154,13 @@ missing_credentials = [name for name, value in (('MAGIO_USERNAME', magio_usernam
 if missing_credentials:
     raise RuntimeError(f"Missing required environment variable(s): {', '.join(missing_credentials)}")
 
-print("Logging in to Magio Go TV")
 magio = MagioGo("./storage", magio_username, magio_password, quality, device_type, device_name)
-refresh()
 
-# Load new playlist and xmltv everyday
+# Start HTTP without waiting for Magio; only one refresh can run at a time.
 scheduler = BackgroundScheduler(timezone="UTC")
-scheduler.add_job(refresh, 'interval', hours=int(os.environ.get('MAGIO_GUIDE_REFRESH_HOURS', 12)))
+scheduler.add_job(refresh, 'interval', id='guide-refresh',
+                  hours=int(os.environ.get('MAGIO_GUIDE_REFRESH_HOURS', 12)),
+                  next_run_time=datetime.datetime.now(datetime.timezone.utc),
+                  max_instances=1, coalesce=True)
 scheduler.start()
-atexit.register(lambda: scheduler.shutdown())
+atexit.register(lambda: scheduler.shutdown(wait=False))

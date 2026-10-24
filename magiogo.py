@@ -3,6 +3,7 @@ import random
 import time
 import requests
 import json
+import threading
 
 try:
     from typing import List
@@ -67,6 +68,7 @@ class MagioGo(IPTVClient):
         self._deviceType = device_type
         self._appVersion = '4.1.1' if self._deviceType == 'OTT_ANDROID' else '0.0.0'
         self._data = MagioGoSessionData()
+        self._auth_lock = threading.Lock()
         super().__init__(storage_dir, '%s.session' % self._user_name)
 
     def _check_response(self, resp):
@@ -101,24 +103,34 @@ class MagioGo(IPTVClient):
     @staticmethod
     def _request():
         session = requests.Session()
-        session.mount('https://', HTTPAdapter(max_retries=Retry(total=5, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504])))
+        session.mount('https://', HTTPAdapter(max_retries=Retry(
+            total=2, backoff_factor=1, backoff_max=5, retry_after_max=10,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )))
         return session
 
     def _get(self, url, params=None, **kwargs):
-
+        kwargs.setdefault('timeout', (5, 15))
         try:
-            resp = self._request().get(url, params=params, **kwargs).json()
+            with self._request() as session:
+                with session.get(url, params=params, **kwargs) as response:
+                    response.raise_for_status()
+                    resp = response.json()
             self._check_response(resp)
             return resp
-        except requests.exceptions.ConnectionError as err:
+        except requests.RequestException as err:
             raise NetConnectionError(str(err))
 
     def _post(self, url, data=None, json=None, **kwargs):
+        kwargs.setdefault('timeout', (5, 15))
         try:
-            resp = self._request().post(url, data=data, json=json, **kwargs).json()
+            with self._request() as session:
+                with session.post(url, data=data, json=json, **kwargs) as response:
+                    response.raise_for_status()
+                    resp = response.json()
             self._check_response(resp)
             return resp
-        except requests.exceptions.ConnectionError as err:
+        except requests.RequestException as err:
             raise NetConnectionError(str(err))
 
     def _init_and_login(self):
@@ -158,30 +170,23 @@ class MagioGo(IPTVClient):
         )
 
     def _login(self):
-        # 0) ensure credentials are configured
-        if not self._user_name or not self._password:
-            raise UserNotDefinedException
-
-        # 1) try to restore a saved session
-        self._load_session(self._data)
-
-        # 2) if there’s no access token yet, do init + login
-        if not self._data.access_token:
-            self._init_and_login()
-
-        # 3) if token expired, refresh it
-        if self._data.refresh_token and self._data.expires_in < int(time.time() * 1000):
-            try:
-                self._post(
-                    'https://skgo.magio.tv/v2/auth/tokens',
-                    json={'refreshToken': self._data.refresh_token},
-                    headers=self._auth_headers()
-                )
-            except MagioGoException:
-                # Stored refresh token can become invalid; force full re-auth.
-                self._data = MagioGoSessionData()
-                self._store_session(self._data)
+        with self._auth_lock:
+            if not self._user_name or not self._password:
+                raise UserNotDefinedException
+            self._load_session(self._data)
+            if not self._data.access_token:
                 self._init_and_login()
+            if self._data.refresh_token and self._data.expires_in < int(time.time() * 1000):
+                try:
+                    self._post(
+                        'https://skgo.magio.tv/v2/auth/tokens',
+                        json={'refreshToken': self._data.refresh_token},
+                        headers=self._auth_headers()
+                    )
+                except MagioGoException:
+                    self._data = MagioGoSessionData()
+                    self._store_session(self._data)
+                    self._init_and_login()
 
     def channels(self, progress=dummy_progress):
         self._login()
@@ -226,8 +231,9 @@ class MagioGo(IPTVClient):
         # Some channels, such as Filmbox Europe HD, seem to have only p0, p1, p2 qualities
         # Check if url is valid (does not return 404), and fallback to p2 quality
         if quality != MagioQuality.medium:
-            r = requests.get(si.url)
-            if r.status_code == 404:
+            with requests.get(si.url, headers={'User-Agent': si.user_agent}, stream=True, timeout=(5, 15)) as response:
+                missing = response.status_code == 404
+            if missing:
                 return self.channel_stream_info(channel_id, programme_id, MagioQuality.medium)
 
         return si
