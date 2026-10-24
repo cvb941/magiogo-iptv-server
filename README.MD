@@ -70,6 +70,10 @@ You can also use **OTT_ANDROID** for a mobile profile.
 
 The HTTP server starts immediately while playlist and guide updates run in the background.
 Failed updates are retried after five minutes; existing files remain available until their replacements are ready.
+Playback requests take priority over guide updates. Magio API calls are spaced at least one second apart,
+with a two-second gap before guide requests and a shared cooldown after rate limits.
+When a channel's requested quality is unavailable, a verified medium-quality fallback is remembered
+for one hour in `storage`; the requested quality is checked again after that period.
 
 ### Python
 ```shell script
