@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
@@ -127,6 +127,20 @@ class MagioRequestTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.client = MagioGo(self.directory.name, 'test', 'test')
+
+    def test_epg_timestamps_remain_naive_utc_and_archive_flags_are_preserved(self):
+        start = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(microsecond=0)
+        end = start + timedelta(hours=1)
+        response = {'items': [{'programs': [{
+            'channel': {'id': 1}, 'program': {}, 'duration': 3600,
+            'startTimeUTC': int(start.timestamp() * 1000), 'endTimeUTC': int(end.timestamp() * 1000),
+        }]}], 'totalCount': 1}
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value=response), patch.object(self.client, '_programme_data', return_value=Mock()):
+            programmes = self.client.epg(['1'], start.replace(tzinfo=None), start.replace(tzinfo=None))
+        programme = programmes['1'][0]
+        self.assertEqual(programme.start_time, start.replace(tzinfo=None))
+        self.assertEqual(programme.end_time, end.replace(tzinfo=None))
+        self.assertTrue(programme.is_replyable)
 
     def test_playback_does_not_wait_behind_a_long_rate_limit_or_auth_lock(self):
         self.client._api_next_request = time.monotonic() + 60

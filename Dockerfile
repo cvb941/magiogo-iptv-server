@@ -1,4 +1,4 @@
-FROM python:3.14-alpine AS runtime
+FROM python:3.15.1-alpine AS runtime
 
 WORKDIR /app
 

@@ -47,7 +47,7 @@ After launching the program, the generated files are available at:
 
 
 ## Setup instructions
-You can run this program either directly with Python 3
+You can run this program either directly with Python 3.15
 or on Docker.
 
 The credentials to Magio GO and other options are passed through environment variables,
@@ -184,7 +184,7 @@ several minutes, filling the stderr pipe and blocking playback.
 
 ### Tests
 
-CI tests Python 3.11 and 3.14, and runs the complete suite as the application user in the
+CI uses Python 3.15.1 (also recorded in `.python-version`) and runs the complete suite as the application user in the
 production Alpine environment with external networking disabled. The Docker test target adds
 FFmpeg to verify actual audio/video decoding through Gunicorn, CDN cookies and redirects,
 and a backend restart with restored sessions. The production image does not include FFmpeg.
