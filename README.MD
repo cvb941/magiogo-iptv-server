@@ -26,7 +26,9 @@ and retrieval of stream and EPG information.
 
 Magio GO IPTV Server works as a web server, listening for stream requests.
 When a request for a particular channel arrives, it retrieves the stream URL from
-Magio servers using the authenticated connection and redirects the client to this URL.
+Magio servers using the authenticated connection. DASH manifests and segments are
+proxied with the CDN session cookies so FFmpeg-based players can open them.
+HLS streams and unsupported DASH manifests use a redirect to the original URL.
 
 Moreover, the app generates and hosts an .m3u8 playlist with the list of 
 channels gathered from Magio, together with URLs pointing to the web server as
