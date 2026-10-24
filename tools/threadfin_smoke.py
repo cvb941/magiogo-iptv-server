@@ -10,14 +10,18 @@ import urllib.request
 from urllib.parse import urlsplit
 
 
-parser = argparse.ArgumentParser(description='Check Threadfin playback through a backend Docker restart. Run with no other active Threadfin streams.')
+parser = argparse.ArgumentParser(description='Check Threadfin playback through a backend Docker restart.')
 parser.add_argument('--playlist', required=True, help='Path to the generated Threadfin M3U')
 parser.add_argument('--channel', required=True)
 parser.add_argument('--backend-url', default='http://127.0.0.1:5000')
 parser.add_argument('--backend-container', default='magiogo-iptv-server')
 parser.add_argument('--threadfin-host', default='127.0.0.1:34400')
 parser.add_argument('--threadfin-container', default='threadfin')
+parser.add_argument('--source-channel-id', help='Limit FFmpeg process checks to this backend channel ID')
+parser.add_argument('--duration', type=int, default=12, help='Seconds to observe after the backend restart')
 args = parser.parse_args()
+if not 5 <= args.duration <= 3600:
+    parser.error('--duration must be between 5 and 3600 seconds')
 
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -29,7 +33,11 @@ def status():
 
 def media_pids():
     output = subprocess.check_output(['docker', 'top', args.threadfin_container, '-eo', 'pid,args'], text=True)
-    return sorted(line.split(None, 1)[0] for line in output.splitlines()[1:] if 'ffmpeg' in line and '/channel/' in line)
+    source = '/channel/' + (args.source_channel_id or '')
+    return sorted(line.split(None, 1)[0] for line in output.splitlines()[1:]
+                  if 'ffmpeg' in line and any(urlsplit(argument).path.rstrip('/') == source or
+                                            (args.source_channel_id is None and source in argument)
+                                            for argument in line.split()))
 
 
 class Player:
@@ -65,7 +73,7 @@ class Player:
     def run(self):
         try:
             self.decoder = subprocess.Popen([
-                'docker', 'exec', '-i', args.threadfin_container, 'timeout', '80', 'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                'docker', 'exec', '-i', args.threadfin_container, 'timeout', str(args.duration + 80), 'ffmpeg', '-hide_banner', '-loglevel', 'error',
                 '-threads', '2', '-i', 'pipe:0', '-map', '0:v:0', '-map', '0:a:0',
                 '-threads', '1', '-fps_mode:v', 'passthrough', '-flush_packets', '1', '-f', 'framecrc', 'pipe:1',
             ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=65536)
@@ -145,7 +153,16 @@ try:
     recovered = time.monotonic()
     at_recovery = [player.snapshot() for player in players]
     print('Backend HTTP recovered in ms:', round((recovered - restart_started) * 1000), flush=True)
-    time.sleep(12)
+    deadline = time.monotonic() + args.duration
+    report_at = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        for player in players:
+            if player.failure is not None:
+                raise RuntimeError(player.failure)
+        if time.monotonic() >= report_at:
+            print('Playback progress:', json.dumps([player.snapshot() for player in players]), flush=True)
+            report_at += 60
     after = [player.snapshot() for player in players]
     current = status()
     for index, player in enumerate(players):
@@ -158,7 +175,7 @@ try:
     pids_after = media_pids()
     assert pids_before == pids_after, 'Threadfin replaced its source FFmpeg process'
     for index, player in enumerate(players):
-        gaps = [second - first for first, second in zip(player.arrivals, player.arrivals[1:]) if second >= restart_started and first <= recovered + 10]
+        gaps = [second - first for first, second in zip(player.arrivals, player.arrivals[1:]) if second >= restart_started]
         print(json.dumps({'channel': player.name, 'first_byte_ms': player.first_byte_ms,
                           'same_http_connection': player.failure is None,
                           'post_restart_video_frames': after[index]['video_frames'] - at_recovery[index]['video_frames'],

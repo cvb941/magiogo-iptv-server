@@ -175,8 +175,12 @@ Select FFmpeg as the Magio playlist's buffer. These FFmpeg options copy video an
 resample audio to avoid repeated audio timestamps when the live DASH manifest updates:
 
 ```text
--hide_banner -loglevel info -analyzeduration 1000000 -probesize 1000000 -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 2 -rw_timeout 15000000 -i [URL] -sn -dn -c:v copy -c:a aac -b:a 192k -af aresample=async=1:first_pts=0 -f mpegts pipe:1
+-hide_banner -nostats -loglevel info -analyzeduration 250000 -probesize 262144 -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 2 -rw_timeout 15000000 -i [URL] -sn -dn -c:v copy -c:a aac -b:a 192k -af aresample=async=1:first_pts=0 -muxdelay 0 -muxpreload 0 -flush_packets 1 -f mpegts pipe:1
 ```
+
+Keep `-nostats` when using informational logging: FFmpeg's progress output uses carriage
+returns rather than newlines. Threadfin's line reader can stop draining that output after
+several minutes, filling the stderr pipe and blocking playback.
 
 ### Tests
 
@@ -199,6 +203,8 @@ python3 tools/threadfin_smoke.py --playlist /path/to/threadfin.m3u --channel "Je
 This restarts the backend container while reading the same Threadfin HTTP connection and
 decoding its video and audio. It checks continued playback, retained FFmpeg process,
 restored CDN sessions and no new Magio API requests. It prints timings without signed URLs or cookies.
+Use `--duration 720` for a twelve-minute stability check. If other channels are active,
+add `--source-channel-id` with the tested channel's Magio ID to scope the FFmpeg process check.
 
 ## Season parsing included
 EPG data for shows from Magio GO contains episode numbers, but for some reason, the season
