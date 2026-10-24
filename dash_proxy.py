@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
-from flask import Blueprint, Response, abort, redirect, request, stream_with_context
+from flask import Blueprint, Response, abort, current_app, redirect, request, stream_with_context
 
 ET.register_namespace('', 'urn:mpeg:dash:schema:mpd:2011')
 
@@ -13,6 +13,8 @@ dash_proxy = Blueprint('dash_proxy', __name__)
 SEGMENT_SESSIONS = {}
 SEGMENT_SESSIONS_LOCK = threading.Lock()
 SEGMENT_SESSION_TTL_SECONDS = 30 * 60
+CHANNEL_SESSIONS = {}
+CHANNEL_LOCKS = {}
 
 
 def _rewrite_manifest(content, manifest_url, proxy_base, origins):
@@ -69,32 +71,70 @@ def _rewrite_manifest(content, manifest_url, proxy_base, origins):
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)
 
 
-def proxy_manifest(stream_info, public_url):
-    if stream_info.manifest_type != 'mpd':
-        return redirect(stream_info.url, code=303)
+def proxy_manifest(stream_info, public_url, channel_id=None):
+    key = (channel_id, public_url) if channel_id is not None else None
+    with SEGMENT_SESSIONS_LOCK:
+        lock = CHANNEL_LOCKS.setdefault(key, threading.Lock()) if key is not None else threading.Lock()
+    with lock:
+        return _fetch_manifest(stream_info, public_url, key)
+
+
+def _fetch_manifest(stream_info, public_url, key):
+    now = time.monotonic()
+    with SEGMENT_SESSIONS_LOCK:
+        sid = CHANNEL_SESSIONS.get(key)
+        cached = SEGMENT_SESSIONS.get(sid)
+        if cached and cached['expires'] <= now:
+            cached = None
+        if cached:
+            cached['expires'] = now + SEGMENT_SESSION_TTL_SECONDS
+            if now - cached['manifest_time'] < 2:
+                return Response(cached['manifest'], mimetype='application/dash+xml')
+
+    if cached:
+        url, user_agent = cached['manifest_url'], cached['user_agent']
+        origins = list(cached['origins'])
+    else:
+        stream_info = stream_info() if callable(stream_info) else stream_info
+        if stream_info.manifest_type != 'mpd':
+            return redirect(stream_info.url, code=303)
+        url, user_agent = stream_info.url, stream_info.user_agent
+        sid, origins = uuid.uuid4().hex, []
 
     try:
         with requests.Session() as session:
-            with session.get(stream_info.url, headers={'User-Agent': stream_info.user_agent}, timeout=10) as upstream:
+            if cached:
+                session.cookies.update(cached['cookies'])
+            with session.get(url, headers={'User-Agent': user_agent}, timeout=10) as upstream:
                 upstream.raise_for_status()
-                sid = uuid.uuid4().hex
-                origins = []
                 manifest = _rewrite_manifest(
                     upstream.content, upstream.url,
                     f'{public_url.rstrip("/")}/segproxy/{sid}/', origins,
                 )
                 cookies = session.cookies.copy()
-    except (ET.ParseError, ValueError, requests.RequestException):
-        return redirect(stream_info.url, code=303)
+                manifest_url = upstream.url
+    except requests.RequestException as error:
+        current_app.logger.warning('DASH manifest fetch failed: %s', type(error).__name__)
+        if cached:
+            with SEGMENT_SESSIONS_LOCK:
+                CHANNEL_SESSIONS.pop(key, None)
+            return _fetch_manifest(stream_info, public_url, key)
+        abort(502)
+    except (ET.ParseError, ValueError) as error:
+        current_app.logger.warning('DASH manifest fallback: %s', error)
+        return redirect(url, code=303)
 
     now = time.monotonic()
     with SEGMENT_SESSIONS_LOCK:
         for expired_sid in [key for key, value in SEGMENT_SESSIONS.items() if value['expires'] <= now]:
             del SEGMENT_SESSIONS[expired_sid]
         SEGMENT_SESSIONS[sid] = {
-            'origins': origins, 'cookies': cookies, 'user_agent': stream_info.user_agent,
+            'origins': origins, 'cookies': cookies, 'user_agent': user_agent,
             'expires': now + SEGMENT_SESSION_TTL_SECONDS,
+            'manifest_url': manifest_url, 'manifest': manifest, 'manifest_time': now,
         }
+        if key is not None:
+            CHANNEL_SESSIONS[key] = sid
     return Response(manifest, mimetype='application/dash+xml')
 
 

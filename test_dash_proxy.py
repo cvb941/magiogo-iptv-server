@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,14 +59,17 @@ class DashProxyTests(unittest.TestCase):
         type(self).requests = []
         type(self).manifest = '<MPD><Period><AdaptationSet><SegmentTemplate media="fragment.m4s"/></AdaptationSet></Period></MPD>'
         proxy.SEGMENT_SESSIONS.clear()
+        proxy.CHANNEL_SESSIONS.clear()
+        proxy.CHANNEL_LOCKS.clear()
         self.now = 1000
         clock = patch.object(proxy, 'time', SimpleNamespace(monotonic=lambda: self.now))
         clock.start()
         self.addCleanup(clock.stop)
         self.stream = SimpleNamespace(url=self.cdn + '/start.mpd', manifest_type='mpd', user_agent='Magio review')
+        self.stream_info = Mock(side_effect=lambda: self.stream)
         self.app = Flask(__name__)
         self.app.register_blueprint(proxy.dash_proxy)
-        self.app.add_url_rule('/channel/<channel>', view_func=lambda channel: proxy.proxy_manifest(self.stream, 'http://proxy.test/'))
+        self.app.add_url_rule('/channel/<channel>', view_func=lambda channel: proxy.proxy_manifest(self.stream_info, 'http://proxy.test/', channel))
         self.app.register_error_handler(404, lambda error: redirect('/'))
         self.client = self.app.test_client()
 
@@ -99,6 +103,38 @@ class DashProxyTests(unittest.TestCase):
         self.assertEqual(response.headers['Accept-Ranges'], 'bytes')
         self.assertEqual(response.headers['ETag'], '"segment"')
         self.assertEqual(self.requests[-1][1]['If-Range'], '"segment"')
+
+    def test_live_manifest_refresh_keeps_session_and_reuses_stream_url(self):
+        first = self.client.get('/channel/1').data
+        self.assertEqual(self.client.get('/channel/1').data, first)
+        self.assertEqual(len(self.requests), 2)
+        self.now += 4
+        type(self).manifest = '<MPD publishTime="updated"><Period/></MPD>'
+        updated = self.client.get('/channel/1').data
+        self.assertNotEqual(first, updated)
+        self.assertEqual(ET.fromstring(first).find('BaseURL').text, ET.fromstring(updated).find('BaseURL').text)
+        self.assertEqual(self.stream_info.call_count, 1)
+        self.assertEqual(self.requests[-1][0], '/live/manifest.mpd')
+        self.assertEqual(self.requests[-1][1]['Cookie'], 'CDNAuth=ok')
+
+    def test_simultaneous_players_share_one_channel_session(self):
+        def open_channel(_):
+            with self.app.test_client() as client:
+                return client.get('/channel/1').data
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            manifests = list(pool.map(open_channel, range(2)))
+        self.assertEqual(manifests[0], manifests[1])
+        self.assertEqual(self.stream_info.call_count, 1)
+
+    def test_failed_cached_manifest_refresh_requests_a_fresh_stream_url(self):
+        first = self.manifest_root().find('BaseURL').text
+        self.now += 4
+        with patch.object(proxy.requests.Session, 'get', side_effect=requests.ConnectionError):
+            self.assertEqual(self.client.get('/channel/1').status_code, 502)
+        self.assertEqual(self.stream_info.call_count, 2)
+        recovered = self.manifest_root().find('BaseURL').text
+        self.assertNotEqual(first, recovered)
 
     def test_active_session_survives_cleanup_after_an_hour(self):
         path = self.segment_path()

@@ -125,6 +125,15 @@ services:
         container_name: magiogo-iptv-server
 ```
 
+### Threadfin
+
+Select FFmpeg as the Magio playlist's buffer. These FFmpeg options copy video and
+resample audio to avoid repeated audio timestamps when the live DASH manifest updates:
+
+```text
+-hide_banner -loglevel info -analyzeduration 1000000 -probesize 1000000 -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 2 -rw_timeout 15000000 -i [URL] -sn -dn -c:v copy -c:a aac -b:a 192k -af aresample=async=1:first_pts=0 -f mpegts pipe:1
+```
+
 ## Season parsing included
 EPG data for shows from Magio GO contains episode numbers, but for some reason, the season
 numbers are always null.

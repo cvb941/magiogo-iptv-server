@@ -311,6 +311,9 @@ class MagioGo(IPTVClient):
 
                         ret[channel].append(programme)
 
+                if fetch_more:
+                    time.sleep(1)
+
         return ret
 
     @staticmethod

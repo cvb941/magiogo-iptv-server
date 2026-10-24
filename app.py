@@ -30,9 +30,8 @@ def index():
 
 @app.route('/channel/<channel_id>')
 def channel_redirect(channel_id):
-    stream_info = magio.channel_stream_info(channel_id)
     magio_iptv_server_public_url = os.environ.get('MAGIO_SERVER_PUBLIC_URL', "http://127.0.0.1:5000")
-    return proxy_manifest(stream_info, magio_iptv_server_public_url)
+    return proxy_manifest(lambda: magio.channel_stream_info(channel_id), magio_iptv_server_public_url, channel_id)
 
 
 @app.errorhandler(404)
