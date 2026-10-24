@@ -2,12 +2,17 @@ import atexit
 import datetime
 import gzip
 import os
+import re
 import sys
+import time
+import threading
+import uuid
 from pathlib import Path
 
+import requests
 import xmltv
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, redirect, render_template
+from flask import Flask, Response, abort, redirect, render_template, request, stream_with_context
 from tqdm import tqdm
 
 from magiogo import *
@@ -20,6 +25,31 @@ Path("public").mkdir(exist_ok=True)
 
 last_refresh = None
 
+# DASH segment proxy sessions: sid -> {base, cookies, user_agent, expires}
+#
+# Magio's CDN authorizes video/audio fragment requests via a session
+# cookie set on the manifest response (the manifest URL itself carries a
+# signed query string, but the SegmentTemplate paths inside it don't -
+# only the cookie ties them back to that session). ffmpeg's dash demuxer
+# also resolves those relative SegmentTemplate paths against the URL it
+# originally requested rather than the URL it ends up at after following
+# redirects, so a bare 303 to the real CDN manifest breaks fragment
+# fetches ("Invalid data found when processing input"). Fetching the
+# manifest here, rewriting its BaseURL to point back at us, and proxying
+# fragment requests through with the captured cookie sidesteps both
+# problems.
+SEGMENT_SESSIONS = {}
+SEGMENT_SESSIONS_LOCK = threading.Lock()
+SEGMENT_SESSION_TTL_SECONDS = 30 * 60
+
+
+def _cleanup_segment_sessions():
+    now = time.time()
+    with SEGMENT_SESSIONS_LOCK:
+        expired = [sid for sid, s in SEGMENT_SESSIONS.items() if s['expires'] < now]
+        for sid in expired:
+            del SEGMENT_SESSIONS[sid]
+
 
 @app.route('/')
 def index():
@@ -29,7 +59,63 @@ def index():
 @app.route('/channel/<channel_id>')
 def channel_redirect(channel_id):
     stream_info = magio.channel_stream_info(channel_id)
-    return redirect(stream_info.url, code=303)
+
+    if stream_info.manifest_type != 'mpd':
+        return redirect(stream_info.url, code=303)
+
+    session = requests.Session()
+    resp = session.get(stream_info.url, headers={'User-Agent': stream_info.user_agent}, timeout=10)
+    resp.raise_for_status()
+
+    base_dir = resp.url.rsplit('/', 1)[0] + '/'
+
+    sid = uuid.uuid4().hex
+    _cleanup_segment_sessions()
+    with SEGMENT_SESSIONS_LOCK:
+        SEGMENT_SESSIONS[sid] = {
+            'base': base_dir,
+            'cookies': session.cookies,
+            'user_agent': stream_info.user_agent,
+            'expires': time.time() + SEGMENT_SESSION_TTL_SECONDS,
+        }
+
+    magio_iptv_server_public_url = os.environ.get('MAGIO_SERVER_PUBLIC_URL', "http://127.0.0.1:5000")
+    proxy_base = f"{magio_iptv_server_public_url}/segproxy/{sid}/"
+
+    manifest = resp.text
+    manifest, count = re.subn(r'(<MPD\b[^>]*>)', r'\1<BaseURL>' + proxy_base + '</BaseURL>', manifest, count=1)
+    if count == 0:
+        # Unexpected manifest shape - fall back to the old behaviour rather than serving something broken.
+        return redirect(stream_info.url, code=303)
+
+    return Response(manifest, mimetype='application/dash+xml')
+
+
+@app.route('/segproxy/<sid>/<path:subpath>')
+def segment_proxy(sid, subpath):
+    with SEGMENT_SESSIONS_LOCK:
+        session_info = SEGMENT_SESSIONS.get(sid)
+
+    if session_info is None:
+        abort(404)
+
+    target_url = session_info['base'] + subpath
+    if request.query_string:
+        target_url += '?' + request.query_string.decode()
+
+    upstream = requests.get(
+        target_url,
+        cookies=session_info['cookies'],
+        headers={'User-Agent': session_info['user_agent']},
+        stream=True,
+        timeout=15,
+    )
+
+    return Response(
+        stream_with_context(upstream.iter_content(chunk_size=65536)),
+        status=upstream.status_code,
+        content_type=upstream.headers.get('Content-Type', 'application/octet-stream'),
+    )
 
 
 @app.errorhandler(404)

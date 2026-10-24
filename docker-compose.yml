@@ -4,6 +4,8 @@ services:
         image: cvb941/magiogo-iptv-server
         ports:
             - '5000:5000'
+        volumes:
+            - ./storage:/app/storage
         environment:
             - MAGIO_USERNAME=your_username
             - MAGIO_PASSWORD=your_password
