@@ -83,6 +83,12 @@ Restored channels fetch a fresh CDN manifest without calling Magio; rejected ses
 Authentication updates are saved atomically only after a complete login or token refresh succeeds.
 Failed attempts preserve the previous session; token files are written with owner-only permissions.
 
+`/health` checks the local HTTP server and is used by the Docker healthcheck. Upstream outages do not
+make the container unhealthy. `/status` reports authentication and guide timestamps, API rate limits,
+CDN proxy errors, and session cache usage without making upstream requests or exposing credentials.
+Counters reset on restart; timestamps use UTC. Successful authentication timestamps are saved with
+the session after the next login or token refresh, so older sessions can initially show `null`.
+
 ### Python
 ```shell script
 # install dependencies

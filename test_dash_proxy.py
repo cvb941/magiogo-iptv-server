@@ -15,6 +15,7 @@ import requests
 from flask import Flask, redirect
 
 import dash_proxy as proxy
+from diagnostics import Diagnostics
 
 
 class DashProxyTests(unittest.TestCase):
@@ -57,12 +58,12 @@ class DashProxyTests(unittest.TestCase):
                     status, body, headers = 200, b'0123456789', {'Content-Type': 'video/mp4'}
                     if self.path == '/live/large.m4s':
                         body = b'x' * 262144
-                    elif self.path == '/live/close.m4s':
+                    elif self.path in ('/live/close.m4s', '/live/broken.m4s'):
                         headers['Connection'] = 'close'
                 self.send_response(status)
                 for name, value in headers.items():
                     self.send_header(name, value)
-                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Content-Length', str(len(body) + (1 if self.path == '/live/broken.m4s' else 0)))
                 self.end_headers()
                 try:
                     self.wfile.write(body)
@@ -100,6 +101,7 @@ class DashProxyTests(unittest.TestCase):
         self.stream = SimpleNamespace(url=self.cdn + '/start.mpd', manifest_type='mpd', user_agent='Magio review')
         self.stream_info = Mock(side_effect=lambda: self.stream)
         self.app = Flask(__name__)
+        self.app.extensions['diagnostics'] = Diagnostics()
         self.app.register_blueprint(proxy.dash_proxy)
         self.app.add_url_rule('/channel/<channel>', view_func=lambda channel: proxy.proxy_manifest(self.stream_info, 'http://proxy.test/', channel))
         self.app.register_error_handler(404, lambda error: redirect('/'))
@@ -200,6 +202,10 @@ class DashProxyTests(unittest.TestCase):
         self.assertEqual(self.stream_info.call_count, 1)
         self.assertEqual(self.requests[-1][0], '/live/manifest.mpd')
         self.assertEqual(self.requests[-1][1]['Cookie'], 'CDNAuth=ok')
+        counters = self.app.extensions['diagnostics'].snapshot()['counters']
+        self.assertEqual(counters['sessions_created'], 1)
+        self.assertEqual(counters['session_cache_hits'], 2)
+        self.assertEqual(counters['manifest_cache_hits'], 1)
 
     def test_simultaneous_players_share_one_channel_session(self):
         def open_channel(_):
@@ -452,3 +458,13 @@ class DashProxyTests(unittest.TestCase):
         with ThreadPoolExecutor(2) as pool:
             self.assertEqual(list(pool.map(open_channel, ('1', '2'))), [200, 200])
         self.stream_info.assert_not_called()
+
+    def test_cdn_errors_include_http_failures_and_interrupted_segment_bodies(self):
+        path = self.segment_path()
+        self.assertEqual(self.client.get(path.replace('fragment.m4s', 'rejected.m4s')).status_code, 403)
+        with self.assertRaises(requests.RequestException):
+            self.client.get(path.replace('fragment.m4s', 'broken.m4s')).get_data()
+        snapshot = self.app.extensions['diagnostics'].snapshot()
+        self.assertEqual(snapshot['counters']['cdn_requests'], 3)
+        self.assertEqual(snapshot['counters']['cdn_errors'], 2)
+        self.assertEqual(snapshot['last']['cdn_errors']['error_type'], 'ChunkedEncodingError')

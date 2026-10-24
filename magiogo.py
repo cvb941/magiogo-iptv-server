@@ -17,6 +17,7 @@ from builtins import super
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from client import *
+from diagnostics import Diagnostics, utc_time
 import datetime
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0'
@@ -35,6 +36,7 @@ class MagioGoSessionData:
         self.expires_in = 0
         self.type = ''
         self.stream_qualities = {}
+        self.authenticated_at = 0
 
 
 class MagioGoDevice:
@@ -72,6 +74,7 @@ class MagioGo(IPTVClient):
         self._deviceType = device_type
         self._appVersion = '4.1.1' if self._deviceType == 'OTT_ANDROID' else '0.0.0'
         self._data = MagioGoSessionData()
+        self.diagnostics = Diagnostics()
         self._auth_lock = threading.Lock()
         self._api_condition = threading.Condition()
         self._api_foreground = 0
@@ -85,6 +88,9 @@ class MagioGo(IPTVClient):
             return
 
         error_code = resp.get('errorCode')
+        self.diagnostics.record('api_errors', error_type='UserInvalidException' if error_code == 'INVALID_CREDENTIALS' else 'MagioGoException')
+        if error_code == 'RATE_LIMIT_EXCEEDED':
+            self.diagnostics.record('api_rate_limits')
         if error_code == 'INVALID_CREDENTIALS':
             raise UserInvalidException()
         raise MagioGoException(error_code, resp.get('errorMessage'))
@@ -118,6 +124,26 @@ class MagioGo(IPTVClient):
             'User-Agent': UA,
         }
 
+    def authentication_status(self):
+        data = self._data.__dict__
+        try:
+            with open(self._storage_file, encoding='utf-8') as source:
+                saved = json.load(source)
+            if isinstance(saved, dict):
+                data = saved
+        except (OSError, ValueError):
+            pass
+        expires = data.get('expires_in', 0)
+        try:
+            expires = expires / 1000 if type(expires) in (int, float) else 0
+        except OverflowError:
+            expires = 0
+        present = all(isinstance(data.get(key), str) and data[key] for key in ('access_token', 'refresh_token', 'type'))
+        return {
+            'token_unexpired': bool(present and time.time() < expires < float('inf')),
+            'expires_at': utc_time(expires), 'last_success': utc_time(data.get('authenticated_at')),
+        }
+
     @staticmethod
     def _request():
         session = requests.Session()
@@ -148,6 +174,7 @@ class MagioGo(IPTVClient):
                 now = time.monotonic()
                 self._api_next_request = now + 1
                 self._api_background_after = now + self._api_guide_interval
+            self.diagnostics.record('api_requests')
             yield
         finally:
             with self._api_condition:
@@ -156,6 +183,8 @@ class MagioGo(IPTVClient):
                 self._api_condition.notify_all()
 
     def _apply_api_cooldown(self, response, attempt=0):
+        if response.status_code >= 400:
+            self.diagnostics.record('api_errors', status=response.status_code)
         if response.status_code not in (429, 500, 502, 503, 504):
             return False
         delay = Retry().get_retry_after(response)
@@ -163,6 +192,7 @@ class MagioGo(IPTVClient):
         with self._api_condition:
             self._api_next_request = max(self._api_next_request, time.monotonic() + delay)
             if response.status_code == 429:
+                self.diagnostics.record('api_rate_limits', status=429)
                 self._api_guide_interval = min(self._api_guide_interval * 2, 60)
                 self._api_background_after = max(self._api_background_after, self._api_next_request)
             self._api_condition.notify_all()
@@ -183,6 +213,8 @@ class MagioGo(IPTVClient):
             self._check_response(resp)
             return resp
         except requests.RequestException as err:
+            if not isinstance(err, requests.HTTPError):
+                self.diagnostics.record('api_errors', error_type=type(err).__name__)
             raise NetConnectionError(str(err))
 
     def _post(self, url, data=None, json=None, **kwargs):
@@ -196,6 +228,8 @@ class MagioGo(IPTVClient):
             self._check_response(resp)
             return resp
         except requests.RequestException as err:
+            if not isinstance(err, requests.HTTPError):
+                self.diagnostics.record('api_errors', error_type=type(err).__name__)
             raise NetConnectionError(str(err)) from err
 
     def _init_and_login(self):
@@ -245,26 +279,28 @@ class MagioGo(IPTVClient):
             if has_tokens and type(saved.expires_in) in (int, float) and time.time() * 1000 < saved.expires_in < float('inf'):
                 self._data = saved
                 return
-            if has_tokens:
-                try:
-                    response = self._post(
-                        'https://skgo.magio.tv/v2/auth/tokens',
-                        json={'refreshToken': saved.refresh_token},
-                        headers=self._auth_headers(saved)
-                    )
-                except (MagioGoException, UserInvalidException, NetConnectionError) as error:
-                    if isinstance(error, NetConnectionError):
-                        rejected = getattr(error.__cause__, 'response', None)
-                        if rejected is None or rejected.status_code not in (401, 403):
+            with self.diagnostics.operation('auth'):
+                if has_tokens:
+                    try:
+                        response = self._post(
+                            'https://skgo.magio.tv/v2/auth/tokens',
+                            json={'refreshToken': saved.refresh_token},
+                            headers=self._auth_headers(saved)
+                        )
+                    except (MagioGoException, UserInvalidException, NetConnectionError) as error:
+                        if isinstance(error, NetConnectionError):
+                            rejected = getattr(error.__cause__, 'response', None)
+                            if rejected is None or rejected.status_code not in (401, 403):
+                                raise
+                        elif isinstance(error, MagioGoException) and error.id == 'RATE_LIMIT_EXCEEDED':
                             raise
-                    elif isinstance(error, MagioGoException) and error.id == 'RATE_LIMIT_EXCEEDED':
-                        raise
+                        response = self._init_and_login()
+                else:
                     response = self._init_and_login()
-            else:
-                response = self._init_and_login()
-            candidate = self._token_session(response, saved)
-            self._store_session(candidate)
-            self._data = candidate
+                candidate = self._token_session(response, saved)
+                candidate.authenticated_at = time.time()
+                self._store_session(candidate)
+                self._data = candidate
 
     def channels(self, progress=dummy_progress):
         self._login()

@@ -108,6 +108,8 @@ class StartupTests(unittest.TestCase):
                         writer.return_value.write.side_effect = OSError('write failed')
                         module.refresh()
                     self.assertEqual(Path('public/magioGuide.xmltv').read_bytes(), old_guide)
+                    self.assertEqual(module.diagnostics.snapshot()['counters']['guide_failures'], 1)
+                    self.assertNotIn('guide', module.diagnostics.snapshot()['running'])
                     retry = module.scheduler.get_job('guide-refresh').next_run_time
                     self.assertLess((retry - module.datetime.datetime.now(module.datetime.timezone.utc)).total_seconds(), 301)
             finally:
@@ -137,6 +139,7 @@ class MagioRequestTests(unittest.TestCase):
                         getattr(self.client, '_' + method)('https://api.test')
                 self.assertEqual(getattr(session, method).call_args.kwargs['timeout'], (5, 15))
                 session.__exit__.assert_called()
+        self.assertEqual(self.client.diagnostics.snapshot()['counters']['api_errors'], 2)
 
     def test_guide_requests_are_spaced_across_pages_and_days(self):
         elapsed = [0]
@@ -261,6 +264,10 @@ class MagioRequestTests(unittest.TestCase):
             self.client._get('another-channel')
         self.assertEqual(requested_at, [0, 4, 8, 12])
         self.assertEqual(self.client._api_foreground, 0)
+        counters = self.client.diagnostics.snapshot()['counters']
+        self.assertEqual(counters['api_requests'], 4)
+        self.assertEqual(counters['api_errors'], 3)
+        self.assertEqual(counters['api_rate_limits'], 3)
 
     def test_guide_honors_full_retry_after_and_reduces_its_request_rate(self):
         elapsed, requested_at = [0], []
@@ -451,6 +458,8 @@ class MagioAuthTests(unittest.TestCase):
         self.assertEqual(self.client._data.stream_qualities, self.previous_data['stream_qualities'])
         self.assertEqual(self.client._data.other_metadata, {'keep': True})
         self.assertEqual(json.loads(self.path.read_text()), self.client._data.__dict__)
+        self.assertGreater(self.client._data.authenticated_at, time.time() - 10)
+        self.assertEqual(self.client.diagnostics.snapshot()['counters']['auth_successes'], 1)
         if os.name != 'nt':
             self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 

@@ -3,6 +3,7 @@ import datetime
 import gzip
 import os
 import sys
+import time
 from pathlib import Path
 
 import xmltv
@@ -10,11 +11,14 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, redirect, render_template
 from tqdm import tqdm
 
-from dash_proxy import dash_proxy, init_session_cache, proxy_manifest
+from dash_proxy import dash_proxy, init_session_cache, proxy_manifest, session_counts
+from diagnostics import Diagnostics, utc_time
 from magiogo import *
 from parse_season_number import parse_season_number
 
 app = Flask(__name__, static_url_path="/", static_folder="public")
+diagnostics = Diagnostics()
+app.extensions['diagnostics'] = diagnostics
 app.register_blueprint(dash_proxy)
 
 # Ensure public dir exists
@@ -26,6 +30,51 @@ last_refresh = None
 @app.route('/')
 def index():
     return render_template("index.html", last_refresh=last_refresh)
+
+
+@app.route('/health')
+def health():
+    return {'status': 'ok'}, 200, {'Cache-Control': 'no-store'}
+
+
+@app.route('/status')
+def status():
+    snapshot = diagnostics.snapshot()
+    counts, last, running = snapshot['counters'], snapshot['last'], snapshot['running']
+    try:
+        available = all(path.is_file() and path.stat().st_size for path in guide_files)
+        modified = guide_files[-1].stat().st_mtime if available else None
+    except OSError:
+        available, modified = False, None
+    age = max(0, int(time.time() - modified)) if modified is not None else None
+    job = scheduler.get_job('guide-refresh')
+    return {
+        'since': snapshot['since'], 'uptime_seconds': snapshot['uptime_seconds'],
+        'authentication': {
+            **magio.authentication_status(), 'refreshing': 'auth' in running,
+            'successes': counts['auth_successes'], 'failures': counts['auth_failures'],
+            'last_failure': last.get('auth_failures'),
+        },
+        'guide': {
+            'available': available, 'last_success': utc_time(modified), 'age_seconds': age,
+            'stale': not available or age > refresh_hours * 3600, 'refreshing': 'guide' in running,
+            'next_refresh': job.next_run_time.isoformat(timespec='seconds') if job and job.next_run_time else None,
+            'successes': counts['guide_successes'], 'failures': counts['guide_failures'],
+            'last_failure': last.get('guide_failures'),
+        },
+        'api': {
+            'requests': counts['api_requests'], 'errors': counts['api_errors'],
+            'rate_limits': counts['api_rate_limits'], 'last_error': last.get('api_errors'),
+            'cooldown_seconds': max(0, int(magio._api_next_request - time.monotonic())),
+        },
+        'cdn': {'requests': counts['cdn_requests'], 'errors': counts['cdn_errors'], 'last_error': last.get('cdn_errors')},
+        'sessions': {
+            **session_counts(), 'restored': counts['sessions_restored'], 'created': counts['sessions_created'],
+            'cache_hits': counts['session_cache_hits'], 'manifest_cache_hits': counts['manifest_cache_hits'],
+            'invalidated': counts['sessions_invalidated'],
+            'storage_errors': counts['cache_errors'], 'last_storage_error': last.get('cache_errors'),
+        },
+    }, 200, {'Cache-Control': 'no-store'}
 
 
 @app.route('/channel/<channel_id>')
@@ -124,13 +173,14 @@ def generate_xmltv(channels):
 
 def refresh():
     try:
-        print("Refreshing playlist and XMLTV guide in the background")
-        channels = magio.channels()
-        generate_m3u8(channels)
-        generate_xmltv(channels)
-        print("Refreshing finished!")
-        global last_refresh
-        last_refresh = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        with diagnostics.operation('guide'):
+            print("Refreshing playlist and XMLTV guide in the background")
+            channels = magio.channels()
+            generate_m3u8(channels)
+            generate_xmltv(channels)
+            print("Refreshing finished!")
+            global last_refresh
+            last_refresh = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     except Exception:
         app.logger.exception("Guide refresh failed; retrying in 5 minutes")
         scheduler.modify_job('guide-refresh', next_run_time=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=5))
@@ -154,6 +204,7 @@ if missing_credentials:
     raise RuntimeError(f"Missing required environment variable(s): {', '.join(missing_credentials)}")
 
 magio = MagioGo("./storage", magio_username, magio_password, quality, device_type, device_name)
+magio.diagnostics = diagnostics
 init_session_cache(app, 'storage/dash-sessions.json', [magio_username, device_type, device_name, quality])
 
 # Start HTTP without waiting for Magio; only one refresh can run at a time.

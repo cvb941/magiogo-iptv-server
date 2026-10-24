@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
-from flask import Blueprint, Response, abort, current_app, redirect, request, stream_with_context
+from flask import Blueprint, Response, abort, current_app, has_app_context, redirect, request, stream_with_context
 
 ET.register_namespace('', 'urn:mpeg:dash:schema:mpd:2011')
 
@@ -25,6 +25,18 @@ CHANNEL_SESSIONS = {}
 CHANNEL_LOCKS = {}
 CDN_ADAPTER = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16)
 atexit.register(CDN_ADAPTER.close)
+
+
+def _record(event, amount=1, **fields):
+    metrics = current_app.extensions.get('diagnostics') if has_app_context() else None
+    if metrics is not None:
+        metrics.record(event, amount, **fields)
+
+
+def session_counts():
+    with SEGMENT_SESSIONS_LOCK:
+        live = {sid for sid, entry in SEGMENT_SESSIONS.items() if entry['expires'] > time.monotonic()}
+        return {'valid_sessions': len(live), 'cached_channels': sum(sid in live for sid in CHANNEL_SESSIONS.values())}
 
 
 def init_session_cache(app, path, context):
@@ -66,9 +78,14 @@ def init_session_cache(app, path, context):
             SEGMENT_SESSIONS.update(sessions)
             CHANNEL_SESSIONS.update(channels)
         app.logger.info('Restored %d DASH sessions', len(sessions))
+        if sessions:
+            with app.app_context():
+                _record('sessions_restored', len(sessions))
     except FileNotFoundError:
         pass
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError) as error:
+        with app.app_context():
+            _record('cache_errors', error_type=type(error).__name__)
         app.logger.warning('Could not restore DASH session cache')
 
 
@@ -98,7 +115,8 @@ def _persist_sessions(force=False):
                 os.fsync(output.fileno())
             os.replace(temporary, cache['path'])
             cache['written_at'] = now
-        except (OSError, TypeError, ValueError):
+        except (OSError, TypeError, ValueError) as error:
+            _record('cache_errors', error_type=type(error).__name__)
             current_app.logger.warning('Could not persist DASH session cache')
         finally:
             if temporary is not None:
@@ -114,10 +132,22 @@ def _invalidate_session(sid):
         for key in keys:
             del CHANNEL_SESSIONS[key]
     if keys:
+        _record('sessions_invalidated')
         _persist_sessions(force=True)
 
 
 class _CDNSession(requests.Session):
+    def request(self, method, url, **kwargs):
+        _record('cdn_requests')
+        try:
+            response = super().request(method, url, **kwargs)
+        except requests.RequestException as error:
+            _record('cdn_errors', error_type=type(error).__name__)
+            raise
+        if response.status_code >= 400:
+            _record('cdn_errors', status=response.status_code)
+        return response
+
     def get_adapter(self, url):
         # Borrow the shared pool without sharing cookies or closing it with this session.
         if url.lower().startswith(('http://', 'https://')):
@@ -195,8 +225,10 @@ def _fetch_manifest(stream_info, public_url, key):
         if cached and cached['expires'] <= now:
             cached = None
         if cached:
+            _record('session_cache_hits')
             cached['expires'] = now + SEGMENT_SESSION_TTL_SECONDS
             if now - cached['manifest_time'] < 2:
+                _record('manifest_cache_hits')
                 return Response(cached['manifest'], mimetype='application/dash+xml')
 
     if cached:
@@ -228,6 +260,7 @@ def _fetch_manifest(stream_info, public_url, key):
             return _fetch_manifest(stream_info, public_url, key)
         abort(502)
     except (ET.ParseError, ValueError) as error:
+        _record('cdn_errors', error_type=type(error).__name__)
         current_app.logger.warning('DASH manifest fallback: %s', error)
         if cached:
             _invalidate_session(sid)
@@ -245,6 +278,8 @@ def _fetch_manifest(stream_info, public_url, key):
         }
         if key is not None:
             CHANNEL_SESSIONS[key] = sid
+    if not cached:
+        _record('sessions_created')
     _persist_sessions(force=True)
     return Response(manifest, mimetype='application/dash+xml')
 
@@ -283,6 +318,9 @@ def segment_proxy(sid, origin_id, subpath):
     def chunks():
         try:
             yield from upstream.iter_content(chunk_size=65536)
+        except requests.RequestException as error:
+            _record('cdn_errors', error_type=type(error).__name__)
+            raise
         finally:
             upstream.close()
 
