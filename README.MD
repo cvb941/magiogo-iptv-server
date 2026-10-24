@@ -77,6 +77,9 @@ Guide requests slow down further if Magio still reports a rate limit.
 Guide pages request up to 100 channels per call.
 When a channel's requested quality is unavailable, a verified medium-quality fallback is remembered
 for one hour in `storage`; the requested quality is checked again after that period.
+Verified DASH URLs, CDN cookies and proxy session IDs are saved privately in `storage/dash-sessions.json`.
+They survive restarts for up to 30 minutes of inactivity, scoped to the account, device and quality settings.
+Restored channels fetch a fresh CDN manifest without calling Magio; rejected sessions request a new stream URL.
 
 ### Python
 ```shell script

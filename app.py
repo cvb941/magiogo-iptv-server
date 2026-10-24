@@ -10,7 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, redirect, render_template
 from tqdm import tqdm
 
-from dash_proxy import dash_proxy, proxy_manifest
+from dash_proxy import dash_proxy, init_session_cache, proxy_manifest
 from magiogo import *
 from parse_season_number import parse_season_number
 
@@ -154,6 +154,7 @@ if missing_credentials:
     raise RuntimeError(f"Missing required environment variable(s): {', '.join(missing_credentials)}")
 
 magio = MagioGo("./storage", magio_username, magio_password, quality, device_type, device_name)
+init_session_cache(app, 'storage/dash-sessions.json', [magio_username, device_type, device_name, quality])
 
 # Start HTTP without waiting for Magio; only one refresh can run at a time.
 refresh_hours = int(os.environ.get('MAGIO_GUIDE_REFRESH_HOURS', 12))

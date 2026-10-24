@@ -1,8 +1,15 @@
 import atexit
+import hashlib
+import json
+import math
+import os
+import tempfile
 import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from http.cookiejar import Cookie
+from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
@@ -18,6 +25,96 @@ CHANNEL_SESSIONS = {}
 CHANNEL_LOCKS = {}
 CDN_ADAPTER = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16)
 atexit.register(CDN_ADAPTER.close)
+
+
+def init_session_cache(app, path, context):
+    cache = {
+        'path': Path(path), 'context': hashlib.sha256(json.dumps(context).encode()).hexdigest(),
+        'lock': threading.Lock(), 'written_at': float('-inf'),
+    }
+    app.extensions['dash_session_cache'] = cache
+    try:
+        data = json.loads(cache['path'].read_text(encoding='utf-8'))
+        if data['version'] != 1 or data['context'] != cache['context']:
+            return
+        now, wall = time.monotonic(), time.time()
+        sessions = {}
+        for sid, entry in data['sessions'].items():
+            remaining = float(entry['expires']) - wall
+            if not math.isfinite(remaining) or remaining <= 0:
+                continue
+            url = urlsplit(entry['manifest_url'])
+            if uuid.UUID(sid).hex != sid or url.scheme not in ('http', 'https') or not url.netloc:
+                raise ValueError('Invalid cached session')
+            if not isinstance(entry['user_agent'], str) or not isinstance(entry['origins'], list) or not entry['origins']:
+                raise ValueError('Invalid cached session')
+            if any(urlsplit(origin).scheme not in ('http', 'https') or not urlsplit(origin).netloc for origin in entry['origins']):
+                raise ValueError('Invalid cached origin')
+            cookies = requests.cookies.RequestsCookieJar()
+            for values in entry['cookies']:
+                values = dict(values)
+                values['rest'] = values.pop('_rest', {})
+                cookies.set_cookie(Cookie(**values))
+            sessions[sid] = {
+                'manifest_url': entry['manifest_url'], 'user_agent': entry['user_agent'],
+                'origins': entry['origins'], 'cookies': cookies,
+                'expires': now + min(remaining, SEGMENT_SESSION_TTL_SECONDS),
+                'manifest': b'', 'manifest_time': float('-inf'),
+            }
+        channels = {(channel, public_url): sid for channel, public_url, sid in data['channels'] if sid in sessions}
+        with SEGMENT_SESSIONS_LOCK:
+            SEGMENT_SESSIONS.update(sessions)
+            CHANNEL_SESSIONS.update(channels)
+        app.logger.info('Restored %d DASH sessions', len(sessions))
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        app.logger.warning('Could not restore DASH session cache')
+
+
+def _persist_sessions(force=False):
+    cache = current_app.extensions.get('dash_session_cache')
+    if cache is None:
+        return
+    with cache['lock']:
+        now, wall = time.monotonic(), time.time()
+        if not force and now - cache['written_at'] < 30:
+            return
+        with SEGMENT_SESSIONS_LOCK:
+            sessions = {
+                sid: {'manifest_url': entry['manifest_url'], 'user_agent': entry['user_agent'],
+                      'origins': list(entry['origins']), 'cookies': [dict(cookie.__dict__) for cookie in entry['cookies']],
+                      'expires': wall + entry['expires'] - now}
+                for sid, entry in SEGMENT_SESSIONS.items() if entry['expires'] > now
+            }
+            channels = [[*key, sid] for key, sid in CHANNEL_SESSIONS.items() if sid in sessions]
+        temporary = None
+        try:
+            cache['path'].parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=cache['path'].parent, delete=False) as output:
+                temporary = output.name
+                json.dump({'version': 1, 'context': cache['context'], 'sessions': sessions, 'channels': channels}, output)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, cache['path'])
+            cache['written_at'] = now
+        except (OSError, TypeError, ValueError):
+            current_app.logger.warning('Could not persist DASH session cache')
+        finally:
+            if temporary is not None:
+                try:
+                    Path(temporary).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
+def _invalidate_session(sid):
+    with SEGMENT_SESSIONS_LOCK:
+        keys = [key for key, value in CHANNEL_SESSIONS.items() if value == sid]
+        for key in keys:
+            del CHANNEL_SESSIONS[key]
+    if keys:
+        _persist_sessions(force=True)
 
 
 class _CDNSession(requests.Session):
@@ -127,12 +224,14 @@ def _fetch_manifest(stream_info, public_url, key):
     except requests.RequestException as error:
         current_app.logger.warning('DASH manifest fetch failed: %s', type(error).__name__)
         if cached:
-            with SEGMENT_SESSIONS_LOCK:
-                CHANNEL_SESSIONS.pop(key, None)
+            _invalidate_session(sid)
             return _fetch_manifest(stream_info, public_url, key)
         abort(502)
     except (ET.ParseError, ValueError) as error:
         current_app.logger.warning('DASH manifest fallback: %s', error)
+        if cached:
+            _invalidate_session(sid)
+            return _fetch_manifest(stream_info, public_url, key)
         return redirect(url, code=303)
 
     now = time.monotonic()
@@ -146,6 +245,7 @@ def _fetch_manifest(stream_info, public_url, key):
         }
         if key is not None:
             CHANNEL_SESSIONS[key] = sid
+    _persist_sessions(force=True)
     return Response(manifest, mimetype='application/dash+xml')
 
 
@@ -174,6 +274,11 @@ def segment_proxy(sid, origin_id, subpath):
             upstream = session.get(target_url, cookies=session_info['cookies'], headers=headers, stream=True, timeout=15)
     except requests.RequestException:
         abort(502)
+
+    if upstream.status_code in (401, 403, 410):
+        _invalidate_session(sid)
+    else:
+        _persist_sessions()
 
     def chunks():
         try:

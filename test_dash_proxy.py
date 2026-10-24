@@ -1,8 +1,12 @@
 import threading
+import json
+import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import unittest
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.parse import urljoin, urlsplit
@@ -35,11 +39,15 @@ class DashProxyTests(unittest.TestCase):
                     self.end_headers()
                     return
                 if self.path == '/live/manifest.mpd':
-                    status, body = 200, cls.manifest.encode()
+                    status, body = cls.manifest_status, cls.manifest.encode()
                     headers = {'Content-Type': 'application/dash+xml', 'Set-Cookie': 'CDNAuth=ok; Path=/'}
                 elif self.path == '/cookies':
                     status, body = 200, self.headers.get('Cookie', '').encode()
                     headers = {'Set-Cookie': 'private=first; Path=/'}
+                elif self.path == '/live/rejected.m4s':
+                    status, body, headers = 403, b'', {}
+                elif self.path == '/live/missing.m4s':
+                    status, body, headers = 404, b'', {}
                 elif self.headers.get('Cookie') != 'CDNAuth=ok':
                     status, body, headers = 403, b'', {}
                 elif self.headers.get('Range') == 'bytes=2-5':
@@ -80,11 +88,13 @@ class DashProxyTests(unittest.TestCase):
         type(self).requests = []
         type(self).connections = []
         type(self).manifest = '<MPD><Period><AdaptationSet><SegmentTemplate media="fragment.m4s"/></AdaptationSet></Period></MPD>'
+        type(self).manifest_status = 200
         proxy.SEGMENT_SESSIONS.clear()
         proxy.CHANNEL_SESSIONS.clear()
         proxy.CHANNEL_LOCKS.clear()
         self.now = 1000
-        clock = patch.object(proxy, 'time', SimpleNamespace(monotonic=lambda: self.now))
+        self.wall = 1700000000
+        clock = patch.object(proxy, 'time', SimpleNamespace(monotonic=lambda: self.now, time=lambda: self.wall))
         clock.start()
         self.addCleanup(clock.stop)
         self.stream = SimpleNamespace(url=self.cdn + '/start.mpd', manifest_type='mpd', user_agent='Magio review')
@@ -94,6 +104,19 @@ class DashProxyTests(unittest.TestCase):
         self.app.add_url_rule('/channel/<channel>', view_func=lambda channel: proxy.proxy_manifest(self.stream_info, 'http://proxy.test/', channel))
         self.app.register_error_handler(404, lambda error: redirect('/'))
         self.client = self.app.test_client()
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.cache_path = Path(self.directory.name) / 'dash-sessions.json'
+        self.cache_context = ['account', 'OTT_STB', 'device', 'p4']
+
+    def restart_cache(self, context=None):
+        proxy.SEGMENT_SESSIONS.clear()
+        proxy.CHANNEL_SESSIONS.clear()
+        proxy.CHANNEL_LOCKS.clear()
+        proxy.CDN_ADAPTER.close()
+        self.now = 0
+        self.wall += 3
+        proxy.init_session_cache(self.app, self.cache_path, context or self.cache_context)
 
     def manifest_root(self):
         response = self.client.get('/channel/1')
@@ -290,3 +313,142 @@ class DashProxyTests(unittest.TestCase):
     def test_invalid_origin_is_rejected(self):
         path = self.segment_path().replace('/0/', '/999/')
         self.assertEqual(self.client.get(path).status_code, 404)
+
+    def test_restart_restores_sessions_without_magio_and_fetches_a_current_manifest(self):
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        path = self.segment_path()
+        self.stream_info.reset_mock()
+        self.stream_info.side_effect = requests.HTTPError('Magio API unavailable')
+        self.restart_cache()
+        type(self).manifest = '<MPD publishTime="after-restart"><Period><AdaptationSet><SegmentTemplate media="fragment.m4s"/></AdaptationSet></Period></MPD>'
+        self.assertEqual(self.client.get(path).data, b'0123456789')
+        response = self.client.get('/channel/1')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ET.fromstring(response.data).get('publishTime'), 'after-restart')
+        self.assertEqual(self.segment_path(), path)
+        self.assertEqual(self.requests[-1][1]['Cookie'], 'CDNAuth=ok')
+        self.stream_info.assert_not_called()
+
+    def test_cookie_domains_paths_security_and_expiration_survive_restart(self):
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        self.segment_path()
+        jar = next(iter(proxy.SEGMENT_SESSIONS.values()))['cookies']
+        jar.set_cookie(requests.cookies.create_cookie('private', 'video', domain='127.0.0.1', path='/video/', expires=self.wall + 600, rest={'HttpOnly': None, 'SameSite': 'Strict'}))
+        jar.set_cookie(requests.cookies.create_cookie('private', 'live', domain='127.0.0.1', path='/live/'))
+        jar.set_cookie(requests.cookies.create_cookie('private', 'other', domain='other.test', path='/'))
+        jar.set_cookie(requests.cookies.create_cookie('secure', 'secret', domain='127.0.0.1', path='/', secure=True))
+        expected = [dict(cookie.__dict__) for cookie in jar]
+        with self.app.app_context():
+            proxy._persist_sessions(force=True)
+        self.restart_cache()
+        restored = next(iter(proxy.SEGMENT_SESSIONS.values()))['cookies']
+        self.assertEqual([dict(cookie.__dict__) for cookie in restored], expected)
+        with requests.Session() as session:
+            session.cookies.update(restored)
+            headers = session.prepare_request(requests.Request('GET', self.cdn + '/live/fragment.m4s')).headers
+        self.assertEqual(set(headers['Cookie'].split('; ')), {'CDNAuth=ok', 'private=live'})
+
+    def test_restart_does_not_extend_the_saved_expiration(self):
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        path = self.segment_path()
+        self.wall += 1700
+        self.restart_cache()
+        self.now += 100
+        self.assertEqual(self.client.get(path).status_code, 410)
+        self.stream_info.reset_mock()
+        self.assertNotEqual(self.segment_path(), path)
+        self.stream_info.assert_called_once()
+
+    def test_segment_activity_is_saved_without_writing_every_fragment(self):
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        path = self.segment_path()
+        saved = self.cache_path.read_bytes()
+        self.now += 29
+        self.wall += 29
+        self.assertEqual(self.client.get(path).status_code, 200)
+        self.assertEqual(self.cache_path.read_bytes(), saved)
+        self.now += 1
+        self.wall += 1
+        self.assertEqual(self.client.get(path).status_code, 200)
+        self.assertNotEqual(self.cache_path.read_bytes(), saved)
+        self.wall += 1790
+        self.restart_cache()
+        self.assertEqual(self.client.get(path).status_code, 200)
+
+    def test_cache_is_scoped_to_account_device_and_quality(self):
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        self.segment_path()
+        for index in range(len(self.cache_context)):
+            context = list(self.cache_context)
+            context[index] = 'different'
+            self.restart_cache(context)
+            self.assertFalse(proxy.CHANNEL_SESSIONS)
+            self.assertFalse(proxy.SEGMENT_SESSIONS)
+
+    def test_rejected_restored_session_is_removed_before_requesting_magio(self):
+        for status, manifest in ((403, '<MPD/>'), (404, '<MPD/>'), (200, '<html/>')):
+            with self.subTest(status=status, manifest=manifest):
+                proxy.SEGMENT_SESSIONS.clear()
+                proxy.CHANNEL_SESSIONS.clear()
+                type(self).manifest_status = 200
+                type(self).manifest = '<MPD/>'
+                self.stream_info.side_effect = lambda: self.stream
+                proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+                self.manifest_root()
+                self.restart_cache()
+                type(self).manifest_status = status
+                type(self).manifest = manifest
+                self.stream_info.reset_mock()
+                self.stream_info.side_effect = requests.HTTPError('Magio API unavailable')
+                self.app.testing = True
+                with self.assertLogs(self.app.logger, level='WARNING'), self.assertRaises(requests.HTTPError):
+                    self.client.get('/channel/1')
+                self.stream_info.assert_called_once()
+                self.assertEqual(json.loads(self.cache_path.read_text())['channels'], [])
+                self.restart_cache()
+                self.requests.clear()
+                with self.assertRaises(requests.HTTPError):
+                    self.client.get('/channel/1')
+                self.assertFalse(self.requests)
+
+    def test_segment_auth_rejection_invalidates_cache_but_missing_fragment_does_not(self):
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        path = self.segment_path()
+        self.assertEqual(self.client.get(path.replace('fragment.m4s', 'missing.m4s')).status_code, 404)
+        self.assertTrue(json.loads(self.cache_path.read_text())['channels'])
+        self.assertEqual(self.client.get(path.replace('fragment.m4s', 'rejected.m4s')).status_code, 403)
+        self.assertEqual(json.loads(self.cache_path.read_text())['channels'], [])
+        self.restart_cache()
+        self.stream_info.reset_mock()
+        self.assertNotEqual(self.segment_path(), path)
+        self.stream_info.assert_called_once()
+
+    def test_corrupt_cache_and_failed_writes_do_not_break_playback(self):
+        self.cache_path.write_text('{broken')
+        with self.assertLogs(self.app.logger, level='WARNING'):
+            proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        path = self.segment_path()
+        previous = self.cache_path.read_bytes()
+        if os.name != 'nt':
+            self.assertEqual(self.cache_path.stat().st_mode & 0o777, 0o600)
+        with patch.object(proxy.os, 'replace', side_effect=OSError), self.assertLogs(self.app.logger, level='WARNING'):
+            self.assertEqual(self.client.get('/channel/2').status_code, 200)
+        self.assertEqual(self.cache_path.read_bytes(), previous)
+        self.assertEqual(list(self.cache_path.parent.iterdir()), [self.cache_path])
+        self.assertEqual(self.client.get(path).data, b'0123456789')
+
+    def test_parallel_channel_writes_restore_both_sessions(self):
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+
+        def open_channel(channel):
+            with self.app.test_client() as client:
+                return client.get('/channel/' + channel).status_code
+
+        with ThreadPoolExecutor(2) as pool:
+            self.assertEqual(list(pool.map(open_channel, ('1', '2'))), [200, 200])
+        self.restart_cache()
+        self.stream_info.reset_mock()
+        self.stream_info.side_effect = requests.HTTPError('Magio API unavailable')
+        with ThreadPoolExecutor(2) as pool:
+            self.assertEqual(list(pool.map(open_channel, ('1', '2'))), [200, 200])
+        self.stream_info.assert_not_called()
