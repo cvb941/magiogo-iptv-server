@@ -155,6 +155,42 @@ class XtreamTests(unittest.TestCase):
         self.magio.channel_epg.assert_called_once()
         self.assertTrue(all(result == results[0] for result in results))
 
+    def test_stale_epg_survives_cooldown_and_restart_then_refreshes_after_retry(self):
+        self.magio.channel_epg.return_value = [self.programme(), self.programme(-8 * 1440)]
+        self.assertEqual(len(self.api('get_simple_data_table', stream_id='4099').json['epg_listings']), 1)
+        self.service.data['epg']['4099']['at'] = time.time() - 3600
+        self.magio.channel_epg.side_effect = ApiCooldownError(60)
+        for _ in range(3):
+            response = self.api('get_simple_data_table', stream_id='4099')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(len(response.json['epg_listings']), 1)
+        self.assertEqual(self.magio.channel_epg.call_count, 2)
+        restored = Xtream(self.magio, self.directory.name, self.context)
+        self.assertEqual(len(restored.programmes(restored.channel('4099'))), 2)
+        self.assertEqual(self.magio.channel_epg.call_count, 2)
+        retry_at = self.service.data['epg']['4099']['retry_at']
+        self.magio.channel_epg.side_effect = None
+        updated = self.programme()
+        updated.title = 'Obnovené EPG'
+        self.magio.channel_epg.return_value = [updated]
+        with patch('xtream.time.time', return_value=retry_at + 1):
+            response = self.api('get_simple_data_table', stream_id='4099')
+        self.assertEqual(base64.b64decode(response.json['epg_listings'][0]['title']).decode(), updated.title)
+        self.assertEqual(self.magio.channel_epg.call_count, 3)
+        self.assertNotIn('retry_at', self.service.data['epg']['4099'])
+
+    def test_unavailable_epg_without_a_recent_cache_still_returns_retry_after(self):
+        self.magio.channel_epg.side_effect = ApiCooldownError(60)
+        response = self.api('get_simple_data_table', stream_id='4099')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers['Retry-After'], '60')
+        self.magio.channel_epg.side_effect = None
+        self.magio.channel_epg.return_value = [self.programme()]
+        self.api('get_simple_data_table', stream_id='4099')
+        self.service.data['epg']['4099'].update(at=time.time() - 25 * 3600, retry_at=time.time() + 3600)
+        self.magio.channel_epg.side_effect = ApiCooldownError(60)
+        self.assertEqual(self.api('get_simple_data_table', stream_id='4099').status_code, 503)
+
     def test_cooldown_is_retryable_without_exposing_upstream_details(self):
         self.magio.channels.side_effect = ApiCooldownError(60)
         response = self.api('get_live_streams')

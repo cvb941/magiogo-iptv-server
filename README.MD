@@ -222,8 +222,10 @@ are rejected. `get_simple_data_table` lists available finished programmes; `get_
 current and upcoming programmes. VOD and series lists are empty.
 
 Channel and per-channel EPG caches are stored privately in `storage/xtream.json` and reused after
-restarts. EPG is fetched on demand and cached for 15 minutes. The API honors the existing Magio
-cooldown and returns `503` with `Retry-After` when upstream is unavailable. Xtream URLs contain the
+restarts. EPG is fetched on demand and cached for 15 minutes. Failed EPG refreshes reuse cached data
+up to 24 hours old and defer the next attempt, honoring upstream cooldowns; archive availability is
+still checked against the current time. Without a usable cache, the API returns `503` with `Retry-After`.
+Xtream URLs contain the
 local credentials, so use HTTPS or a trusted private network and avoid logging request URLs.
 
 ### Tests

@@ -3,6 +3,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import tempfile
@@ -83,16 +84,24 @@ class Xtream:
             lock = self.epg_locks.setdefault(key, threading.Lock())
         with lock:
             cached = self.data['epg'].get(key, {})
-            if time.time() - cached.get('at', 0) > 15 * 60:
+            age = time.time() - cached.get('at', 0)
+            if age > 15 * 60 and (time.time() >= cached.get('retry_at', 0) or age > 24 * 3600):
                 now = dt.datetime.now(dt.UTC)
-                programmes = self.magio.channel_epg(key, now - dt.timedelta(days=channel['archive_days']), now + dt.timedelta(days=1))
-                rows = [{
-                    'id': zlib.crc32(f"{key}:{p.metadata.get('schedule_id', '')}:{p.start_time}".encode()) & 0x7fffffff,
-                    'schedule_id': p.metadata.get('schedule_id'), 'title': p.title, 'description': p.description,
-                    'start': int(p.start_time.replace(tzinfo=dt.UTC).timestamp()),
-                    'end': int(p.end_time.replace(tzinfo=dt.UTC).timestamp()),
-                } for p in programmes]
-                cached = {'at': time.time(), 'programmes': rows}
+                try:
+                    programmes = self.magio.channel_epg(key, now - dt.timedelta(days=channel['archive_days']), now + dt.timedelta(days=1))
+                except (IPTVException, MagioGoException, requests.RequestException) as error:
+                    if not cached.get('programmes') or time.time() - cached['at'] > 24 * 3600:
+                        raise
+                    cached = dict(cached, retry_at=time.time() + max(60, getattr(error, 'retry_after', 300)))
+                    logging.getLogger(__name__).warning('Xtream EPG refresh failed (%s); using cached programmes', type(error).__name__)
+                else:
+                    rows = [{
+                        'id': zlib.crc32(f"{key}:{p.metadata.get('schedule_id', '')}:{p.start_time}".encode()) & 0x7fffffff,
+                        'schedule_id': p.metadata.get('schedule_id'), 'title': p.title, 'description': p.description,
+                        'start': int(p.start_time.replace(tzinfo=dt.UTC).timestamp()),
+                        'end': int(p.end_time.replace(tzinfo=dt.UTC).timestamp()),
+                    } for p in programmes]
+                    cached = {'at': time.time(), 'programmes': rows}
                 with self.lock:
                     self.data['epg'][key] = cached
                     self.data['epg'] = {k: v for k, v in self.data['epg'].items() if time.time() - v['at'] < 24 * 3600}
