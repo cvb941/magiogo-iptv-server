@@ -158,11 +158,36 @@ class _CDNSession(requests.Session):
         return super().get_adapter(url)
 
 
+def _scale_archive_timeline(template, namespace):
+    if not template.get('timescale'):
+        return
+    fields = [(element, name) for element, names in
+              [(template, ('timescale', 'presentationTimeOffset'))] +
+              [(s, ('t', 'd')) for s in template.findall(f'{namespace}SegmentTimeline/{namespace}S')]
+              for name in names if name in element.attrib]
+    values = [int(element.get(name)) for element, name in fields]
+    factor = 1
+    while max(values) // factor > (2**63 - 1) // 1000:
+        factor *= 10
+    urls = ('media', 'initialization', 'index', 'bitstreamSwitching')
+    if factor == 1 or any(value % factor for value in values) or any('$Time%' in template.get(name, '') for name in urls):
+        return
+    # FFmpeg multiplies timeline ticks by 1000 when seeking; epoch-based video ticks overflow int64.
+    for (element, name), value in zip(fields, values):
+        element.set(name, str(value // factor))
+    for name in urls:
+        if name in template.attrib:
+            template.set(name, template.get(name).replace('$Time$', '$Time$' + '0' * (len(str(factor)) - 1)))
+
+
 def _rewrite_manifest(content, manifest_url, proxy_base, origins):
     root = ET.fromstring(content)
     namespace = root.tag[:-3] if root.tag.endswith('}MPD') else ''
     if root.tag != namespace + 'MPD':
         raise ValueError('Expected an MPD')
+    if root.get('type', 'static') == 'static':
+        for template in root.findall('.//' + namespace + 'SegmentTemplate'):
+            _scale_archive_timeline(template, namespace)
 
     def proxy_url(url):
         parts = urlsplit(url)

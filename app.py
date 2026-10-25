@@ -17,6 +17,7 @@ from dash_proxy import dash_proxy, init_session_cache, proxy_manifest, session_c
 from diagnostics import Diagnostics, utc_time
 from magiogo import *
 from parse_season_number import parse_season_number
+from xtream import init_xtream
 
 app = Flask(__name__, static_url_path="/", static_folder="public")
 diagnostics = Diagnostics()
@@ -186,6 +187,7 @@ def refresh():
         with diagnostics.operation('guide'):
             print("Refreshing playlist and XMLTV guide in the background")
             channels = magio.channels()
+            xtream.update_channels(channels)
             generate_m3u8(channels)
             generate_xmltv(channels)
             print("Refreshing finished!")
@@ -228,6 +230,7 @@ if missing_credentials:
 
 magio = MagioGo("./storage", magio_username, magio_password, quality, device_type, device_name)
 magio.diagnostics = diagnostics
+xtream = init_xtream(app, magio, 'storage', [magio_username, device_type, device_name, quality])
 init_session_cache(app, 'storage/dash-sessions.json', [magio_username, device_type, device_name, quality])
 
 # Start HTTP without waiting for Magio; only one refresh can run at a time.

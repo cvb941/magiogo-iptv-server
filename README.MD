@@ -182,12 +182,57 @@ Keep `-nostats` when using informational logging: FFmpeg's progress output uses 
 returns rather than newlines. Threadfin's line reader can stop draining that output after
 several minutes, filling the stderr pipe and blocking playback.
 
+### Xtream API and Jellyfin archive
+
+Enable the optional API with separate local credentials:
+
+```text
+XTREAM_USERNAME=iptv
+XTREAM_PASSWORD=your_random_url_safe_password
+# Optional: address reachable from Jellyfin and its players; otherwise the request address is used.
+XTREAM_PUBLIC_URL=http://your-server:5000
+```
+
+Add these environment variables to the Magio server container. Use a different password from
+your Magio account. The API is disabled unless both credentials are set.
+
+Install [Jellyfin.Xtream](https://github.com/Kevinjil/Jellyfin.Xtream) using its plugin repository:
+
+```text
+https://kevinjil.github.io/Jellyfin.Xtream/repository.json
+```
+
+In the plugin's **Credentials** tab, enter the Magio server's base URL and the local credentials
+above. In **Live TV**, select the channels and enable **Show the catch-up channel to users**.
+The **Xtream Catch-up** section lists channels, days and finished programmes. It is separate from
+Jellyfin's Live TV guide. The plugin also exposes selected live channels; selecting the same channels
+as an existing Threadfin tuner can produce duplicates.
+
+This adapter serves native **DASH (`mpd`)**, which Jellyfin probes and can seek within for archive
+programmes. High-precision epoch timelines are rescaled exactly to avoid integer overflow in FFmpeg's
+seek calculations, preserving the media timestamps and original CDN segment names.
+It does not convert streams to MPEG-TS or HLS; clients requiring `ts` or `m3u8` output
+are unsupported. Existing M3U/XMLTV and Threadfin endpoints continue to work independently.
+
+Implemented endpoints: `/player_api.php`, `/get.php`, `/xmltv.php`, live DASH URLs and
+`/streaming/timeshift.php` (also `/timeshift/{username}/{password}/{duration}/{start}/{channel}.mpd`).
+Times use UTC; duration is in minutes and start uses `YYYY-MM-DD:HH-MM`. Archive requests select
+a complete EPG programme within the channel's archive window, up to seven days. Arbitrary time ranges
+are rejected. `get_simple_data_table` lists available finished programmes; `get_short_epg` lists
+current and upcoming programmes. VOD and series lists are empty.
+
+Channel and per-channel EPG caches are stored privately in `storage/xtream.json` and reused after
+restarts. EPG is fetched on demand and cached for 15 minutes. The API honors the existing Magio
+cooldown and returns `503` with `Retry-After` when upstream is unavailable. Xtream URLs contain the
+local credentials, so use HTTPS or a trusted private network and avoid logging request URLs.
+
 ### Tests
 
 CI uses Python 3.15.1 (also recorded in `.python-version`) and runs the complete suite as the application user in the
 production Alpine environment with external networking disabled. The Docker test target adds
 FFmpeg to verify actual audio/video decoding through Gunicorn, CDN cookies and redirects,
-and a backend restart with restored sessions. The production image does not include FFmpeg.
+and archive seeking across a backend restart with restored sessions, including epoch-based timelines.
+The production image does not include FFmpeg.
 
 ```shell
 docker build --target test -t magio-test .

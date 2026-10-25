@@ -330,12 +330,13 @@ class MagioGo(IPTVClient):
                 self._store_session(candidate)
                 self._data = candidate
 
-    def channels(self, progress=dummy_progress):
-        self._login()
+    def channels(self, progress=dummy_progress, max_wait=None):
+        self._login(max_wait=max_wait)
 
         progress(0)
 
         resp = self._get('https://skgo.magio.tv/v2/television/channels',
+                         max_wait=max_wait,
                          params={'list': 'LIVE', 'queryScope': 'LIVE'},
                          headers=self._auth_headers())
         ret = []
@@ -407,8 +408,10 @@ class MagioGo(IPTVClient):
             return si
 
     def programme_stream_info(self, programme_id):
-        self._login()
+        # ARCHIVE expects the airing's scheduleId, not the reusable programId.
+        self._login(max_wait=5)
         resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
+                         max_wait=5,
                          params={'service': 'ARCHIVE',
                                  'name': self._device,
                                  'devtype': self._deviceType,
@@ -471,15 +474,41 @@ class MagioGo(IPTVClient):
                         if channel not in ret:
                             ret[channel] = []
 
-                        programme = self._programme_data(p['program'])
-                        programme.start_time = datetime.datetime.fromtimestamp(p['startTimeUTC'] / 1000, datetime.UTC).replace(tzinfo=None)
-                        programme.end_time = datetime.datetime.fromtimestamp(p['endTimeUTC'] / 1000, datetime.UTC).replace(tzinfo=None)
-                        programme.duration = p['duration']
-                        programme.is_replyable = (programme.start_time > (now - datetime.timedelta(days=7))) and (programme.end_time < now)
-
-                        ret[channel].append(programme)
+                        ret[channel].append(self._scheduled_programme(p, now))
 
         return ret
+
+    def channel_epg(self, channel_id, date_from, date_to):
+        channel_id = str(channel_id)
+        if not channel_id.isdecimal():
+            raise ValueError('Invalid channel ID')
+        self._login(max_wait=5)
+        programmes, offset = [], 0
+        now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        filter = (f'channel.id=in=({channel_id});endTime=ge={date_from:%Y-%m-%dT%H:%M:%S}.000Z'
+                  f';startTime=le={date_to:%Y-%m-%dT%H:%M:%S}.999Z')
+        for _ in range(32):
+            response = self._get('https://skgo.magio.tv/v2/television/epg', max_wait=5,
+                                 params={'filter': filter, 'limit': '100', 'offset': offset},
+                                 headers=self._auth_headers())
+            for item in response['items']:
+                for airing in item['programs']:
+                    if str(airing['channel']['id']) == channel_id:
+                        programmes.append(self._scheduled_programme(airing, now))
+            offset += len(response['items'])
+            if not response['items'] or offset >= response['totalCount']:
+                return sorted(programmes, key=lambda p: p.start_time)
+        raise NetConnectionError('EPG pagination limit exceeded')
+
+    def _scheduled_programme(self, airing, now):
+        programme = self._programme_data(airing['program'])
+        programme.start_time = datetime.datetime.fromtimestamp(airing['startTimeUTC'] / 1000, datetime.UTC).replace(tzinfo=None)
+        programme.end_time = datetime.datetime.fromtimestamp(airing['endTimeUTC'] / 1000, datetime.UTC).replace(tzinfo=None)
+        programme.duration = airing['duration']
+        programme.is_replyable = now - datetime.timedelta(days=self.archive_days()) < programme.start_time < programme.end_time < now
+        if airing.get('scheduleId') is not None:
+            programme.metadata['schedule_id'] = str(airing['scheduleId'])
+        return programme
 
     @staticmethod
     def _programme_data(pi):

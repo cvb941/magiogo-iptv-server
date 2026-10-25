@@ -18,6 +18,37 @@ import dash_proxy as proxy
 from diagnostics import Diagnostics
 
 
+class ArchiveTimelineTests(unittest.TestCase):
+    def test_epoch_timeline_rescaling_preserves_time_and_original_segment_urls(self):
+        original = 17929026003610000
+        content = f'''<MPD type="static"><Period><AdaptationSet><SegmentTemplate timescale="10000000"
+            presentationTimeOffset="{original}" media="v-$Time$.m4s" initialization="init.mp4">
+            <SegmentTimeline><S t="{original}" d="40000000" r="224"/><S d="20000000"/></SegmentTimeline>
+            </SegmentTemplate></AdaptationSet></Period></MPD>'''
+        root = ET.fromstring(proxy._rewrite_manifest(content, 'https://cdn.test/manifest.mpd', 'https://proxy.test/seg/', []))
+        template = root.find('.//SegmentTemplate')
+        self.assertEqual(template.get('timescale'), '1000000')
+        self.assertEqual(int(template.get('presentationTimeOffset')) * 10, original)
+        segment = template.find('SegmentTimeline/S')
+        self.assertLess(int(segment.get('t')) * 1000, 2**63)
+        self.assertEqual(int(segment.get('d')), 4000000)
+        self.assertEqual(segment.get('r'), '224')
+        self.assertEqual(template.get('media').replace('$Time$', segment.get('t')), f'v-{original}.m4s')
+
+    def test_dynamic_timeline_and_inexact_or_formatted_templates_are_preserved(self):
+        for kind, timestamp, media in [('dynamic', 17929026003610000, 'v-$Time$.m4s'),
+                                        ('static', 17929026003610001, 'v-$Time$.m4s'),
+                                        ('static', 17929026003610000, 'v-$Time%019d$.m4s')]:
+            content = f'''<MPD type="{kind}"><Period><SegmentTemplate timescale="10000000"
+                presentationTimeOffset="{timestamp}" media="{media}">
+                <SegmentTimeline><S t="{timestamp}" d="40000000"/></SegmentTimeline>
+                </SegmentTemplate></Period></MPD>'''
+            root = ET.fromstring(proxy._rewrite_manifest(content, 'https://cdn.test/manifest.mpd', 'https://proxy.test/seg/', []))
+            template = root.find('.//SegmentTemplate')
+            self.assertEqual(template.get('timescale'), '10000000')
+            self.assertEqual(template.get('media'), media)
+
+
 class DashProxyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
