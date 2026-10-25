@@ -100,6 +100,13 @@ class Xtream:
                         'schedule_id': p.metadata.get('schedule_id'), 'title': p.title, 'description': p.description,
                         'start': int(p.start_time.replace(tzinfo=dt.UTC).timestamp()),
                         'end': int(p.end_time.replace(tzinfo=dt.UTC).timestamp()),
+                        'metadata': {
+                            'type': p.metadata.get('media_type', 'other'), 'original_title': p.metadata.get('original_title', ''),
+                            'series_name': p.metadata.get('series_name', ''), 'episode_title': p.metadata.get('episode_title', ''),
+                            'year': p.year, 'season': p.seasonNo, 'episode': p.episodeNo,
+                            'poster': p.poster, 'thumbnail': p.thumbnail, 'genres': p.genres,
+                            'actors': p.actors, 'directors': p.directors,
+                        },
                     } for p in programmes]
                     cached = {'at': time.time(), 'programmes': rows}
                 with self.lock:
@@ -200,6 +207,7 @@ def init_xtream(app, magio, storage_dir, context):
                 'end': dt.datetime.fromtimestamp(p['end'], dt.UTC).strftime('%Y-%m-%d %H:%M:%S'),
                 'start_timestamp': str(p['start']), 'stop_timestamp': str(p['end']),
                 'now_playing': int(p['start'] <= time.time() < p['end']), 'has_archive': int(has_archive(channel, p)),
+                'programme_metadata': p.get('metadata'),
             } for p in rows]}
         return {'error': 'unsupported_action'}, 400
 

@@ -221,6 +221,11 @@ a complete EPG programme within the channel's archive window, up to seven days. 
 are rejected. `get_simple_data_table` lists available finished programmes; `get_short_epg` lists
 current and upcoming programmes. VOD and series lists are empty.
 
+EPG rows also include an optional `programme_metadata` object with Magio's content type,
+production year, series/episode details and artwork. The cvb941 Xtream Library fork can use
+these fields to match movies and episodes inside Catch-up. Unknown or ambiguous programmes
+retain their EPG details; the extension does not turn the archive into a VOD library.
+
 Channel and per-channel EPG caches are stored privately in `storage/xtream.json` and reused after
 restarts. EPG is fetched on demand and cached for 15 minutes. Failed EPG refreshes reuse cached data
 up to 24 hours old and defer the next attempt, honoring upstream cooldowns; archive availability is

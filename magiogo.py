@@ -20,6 +20,7 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from client import *
 from diagnostics import Diagnostics, utc_time
+from parse_season_number import parse_season_number
 import datetime
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0'
@@ -531,6 +532,16 @@ class MagioGo(IPTVClient):
             programme.seasonNo = safe_int(pv['seasonNumber'])
         if pv['creationYear'] is not None:
             programme.year = safe_int(pv['creationYear'])
+        category = (pi.get('programCategory') or {}).get('mscname', '')
+        kind = 'movie' if category == 'MSEPGC_MV' else 'episode' if (
+            category == 'MSEPGC_Series' or
+            category == 'MSEPGC_Kids' and pv.get('seriesId') and programme.episodeNo is not None
+        ) else 'other'
+        series_name, inferred_season = parse_season_number(programme.title) if kind == 'episode' else ('', None)
+        if kind == 'episode' and programme.seasonNo is None:
+            programme.seasonNo = inferred_season
+        programme.metadata.update(media_type=kind, series_name=series_name,
+                                  episode_title=pi.get('episodeTitle') or '', original_title=pi.get('originalTitle') or '')
         for i in pi['images']:
             programme.thumbnail = i
             break
