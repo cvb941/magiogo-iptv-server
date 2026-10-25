@@ -113,6 +113,10 @@ class Xtream:
                     self.data['epg'][key] = cached
                     self.data['epg'] = {k: v for k, v in self.data['epg'].items() if time.time() - v['at'] < 24 * 3600}
                     self.save()
+            for row in cached.get('programmes', []):
+                subtitle = (row.get('metadata') or {}).get('episode_title')
+                if subtitle:
+                    row['description'] = row['description'].removeprefix(subtitle + '\n')
             return cached.get('programmes', [])
 
 

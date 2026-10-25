@@ -117,11 +117,13 @@ class XtreamTests(unittest.TestCase):
     def test_archive_metadata_survives_cache_and_api_without_exposing_schedule_id(self):
         programme = self.programme()
         programme.metadata.update(media_type='episode', series_name='Kosti', episode_title='Pilot')
+        programme.description = 'Pilot\nSamotný popis epizódy.'
         programme.year, programme.seasonNo, programme.episodeNo = 2005, 1, 1
         programme.poster, programme.thumbnail = 'https://image.test/poster.jpg', 'https://image.test/still.jpg'
         programme.genres, programme.actors, programme.directors = ['Krimi'], ['Herec'], ['Režisér']
         self.magio.channel_epg.return_value = [programme]
         response = self.api('get_simple_data_table', stream_id='4099')
+        self.assertEqual(base64.b64decode(response.json['epg_listings'][0]['description']).decode(), 'Samotný popis epizódy.')
         metadata = response.json['epg_listings'][0]['programme_metadata']
         self.assertEqual((metadata['type'], metadata['series_name'], metadata['season'], metadata['episode']),
                          ('episode', 'Kosti', 1, 1))
@@ -130,6 +132,7 @@ class XtreamTests(unittest.TestCase):
         self.assertNotIn('12345678901', json.dumps(metadata))
         restored = Xtream(self.magio, self.directory.name, self.context)
         self.assertEqual(restored.programmes(restored.channel('4099'))[0]['metadata'], metadata)
+        self.assertEqual(restored.programmes(restored.channel('4099'))[0]['description'], 'Samotný popis epizódy.')
 
     def test_old_epg_cache_without_metadata_remains_readable(self):
         self.service.channel('4099')
@@ -242,18 +245,25 @@ class ArchiveApiTests(unittest.TestCase):
             ('MSEPGC_Kids', 'Rozprávka II', 'series-2', 'episode', 2),
             ('MSEPGC_News', 'Správy', 'news-1', 'other', None),
             ('MSEPGC_Sports', 'Futbal', None, 'other', None),
+            ('EPG_CATEGORIES_V2_ID.14', 'Film', 'movie-1', 'movie', None),
+            ('EPG_CATEGORIES_V2_ID.1G', 'Poirot VIII.', 'series-3', 'episode', 8),
+            ('EPG_CATEGORIES_V2_ID.1J', 'Alžbetin dvor', 'series-4', 'episode', None),
+            ('EPG_CATEGORIES_V2_ID.52', 'Rozprávka II', 'series-5', 'episode', 2),
+            ('EPG_CATEGORIES_V2_ID.2G', 'Peniaze', 'news-2', 'other', None),
+            (None, 'Nezaradené', None, 'other', None),
         ]:
             with self.subTest(category=category):
                 data = {'programId': 77, 'title': title, 'episodeTitle': 'Epizóda', 'description': 'Popis',
-                        'programValue': {'episodeId': '5', 'seasonNumber': None, 'creationYear': '2019', 'seriesId': series_id},
+                        'programValue': {'episodeId': None if expected == 'movie' else '5', 'seasonNumber': None, 'creationYear': '2019', 'seriesId': series_id},
                         'images': [], 'programRole': {'directors': [], 'actors': []},
                         'programCategory': {'mscname': category, 'subCategories': []}}
                 programme = MagioGo._programme_data(data)
+                self.assertEqual(programme.description, 'Popis')
                 self.assertEqual(programme.metadata['media_type'], expected)
                 self.assertEqual(programme.seasonNo, season)
-                self.assertEqual(programme.episodeNo, 5)
+                self.assertEqual(programme.episodeNo, None if expected == 'movie' else 5)
                 if expected == 'episode':
-                    self.assertEqual(programme.metadata['series_name'], title.split(' ')[0])
+                    self.assertEqual(programme.metadata['series_name'], title.split(' ')[0] if season else title)
 
     def test_channel_epg_paginates_filters_channels_and_preserves_schedule_id(self):
         with tempfile.TemporaryDirectory() as directory:

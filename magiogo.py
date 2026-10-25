@@ -356,9 +356,17 @@ class MagioGo(IPTVClient):
         return ret
 
     def channel_stream_info(self, channel_id, programme_id=None, quality_override=None):
+        return self._stream_info('LIVE', channel_id, quality_override)
+
+    def programme_stream_info(self, programme_id):
+        # ARCHIVE expects the airing's scheduleId, not the reusable programId.
+        return self._stream_info('ARCHIVE', programme_id)
+
+    def _stream_info(self, service, stream_id, quality_override=None):
         self._login(max_wait=5)
         requested = quality_override or self._quality
-        cache_key = json.dumps([self._deviceType, self._device, requested, str(channel_id)])
+        cache_key = json.dumps([self._deviceType, self._device, requested,
+                                str(stream_id) if service == 'LIVE' else f'{service}:{stream_id}'])
         with self._auth_lock:
             cached = self._data.stream_qualities.get(cache_key, {})
             cache_valid = cached.get('quality') == MagioQuality.medium and cached.get('expires', 0) > time.time()
@@ -367,10 +375,10 @@ class MagioGo(IPTVClient):
         for quality in qualities:
             resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
                          max_wait=5,
-                         params={'service': 'LIVE',
+                         params={'service': service,
                                  'name': self._device,
                                  'devtype': self._deviceType,
-                                 'id': channel_id,
+                                 'id': stream_id,
                                  'prof': quality,
                                  'ecid': '',
                                  'drm': 'verimatrix'},
@@ -405,27 +413,8 @@ class MagioGo(IPTVClient):
                     except OSError:
                         pass  # This optional cache must not interrupt playback.
             if quality != requested and status == 404 and quality == qualities[0]:
-                return self.channel_stream_info(channel_id, programme_id, requested)
+                return self._stream_info(service, stream_id, requested)
             return si
-
-    def programme_stream_info(self, programme_id):
-        # ARCHIVE expects the airing's scheduleId, not the reusable programId.
-        self._login(max_wait=5)
-        resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
-                         max_wait=5,
-                         params={'service': 'ARCHIVE',
-                                 'name': self._device,
-                                 'devtype': self._deviceType,
-                                 'id': programme_id,
-                                 'prof': self._quality,
-                                 'ecid': '',
-                                 'drm': 'verimatrix'},
-                         headers=self._auth_headers())
-        si = StreamInfo()
-        si.url = resp['url']
-        si.manifest_type = 'mpd' if si.url.find('.mpd') > 0 else 'm3u'
-        si.user_agent = UA
-        return si
 
     @staticmethod
     def _strptime(date_string, format):
@@ -523,7 +512,7 @@ class MagioGo(IPTVClient):
         programme = Programme()
         programme.id = pi['programId']
         programme.title = pi['title']
-        programme.description = "%s\n%s" % (pi['episodeTitle'] or '', pi['description'] or '')
+        programme.description = pi['description'] or ''
 
         pv = pi['programValue']
         if pv['episodeId'] is not None:
@@ -532,11 +521,13 @@ class MagioGo(IPTVClient):
             programme.seasonNo = safe_int(pv['seasonNumber'])
         if pv['creationYear'] is not None:
             programme.year = safe_int(pv['creationYear'])
-        category = (pi.get('programCategory') or {}).get('mscname', '')
+        category = (pi.get('programCategory') or {}).get('mscname') or ''
+        fiction = category.startswith('EPG_CATEGORIES_V2_ID.1')
+        kids = category == 'MSEPGC_Kids' or category.startswith('EPG_CATEGORIES_V2_ID.5')
         kind = 'movie' if category == 'MSEPGC_MV' else 'episode' if (
             category == 'MSEPGC_Series' or
-            category == 'MSEPGC_Kids' and pv.get('seriesId') and programme.episodeNo is not None
-        ) else 'other'
+            (fiction or kids) and pv.get('seriesId') and programme.episodeNo is not None
+        ) else 'movie' if fiction and programme.episodeNo is None else 'other'
         series_name, inferred_season = parse_season_number(programme.title) if kind == 'episode' else ('', None)
         if kind == 'episode' and programme.seasonNo is None:
             programme.seasonNo = inferred_season

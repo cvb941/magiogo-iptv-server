@@ -430,6 +430,41 @@ class MagioRequestTests(unittest.TestCase):
             self.client.channel_stream_info('1', quality_override='p4')
         self.assertEqual(self.client._data.stream_qualities, {})
 
+    def test_archive_quality_fallback_uses_schedule_id_and_is_separate_from_live(self):
+        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
+        missing.__enter__.return_value = missing
+        ready.__enter__.return_value = ready
+        with patch.object(self.client, '_login'), patch.object(self.client, '_store_session'), patch.object(self.client, '_get',
+                side_effect=[{'url': 'https://cdn.test/high.mpd'}, {'url': 'https://cdn.test/medium.mpd'}]) as api, \
+                patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
+            self.client._quality = 'p4'
+            stream = self.client.programme_stream_info('12345678901')
+        self.assertEqual(stream.url, 'https://cdn.test/medium.mpd')
+        self.assertEqual([(c.kwargs['params']['service'], c.kwargs['params']['id'], c.kwargs['params']['prof'])
+                          for c in api.call_args_list], [('ARCHIVE', '12345678901', 'p4'), ('ARCHIVE', '12345678901', 'p2')])
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/ready.mpd'}) as api, \
+                patch('magiogo.requests.get', return_value=ready):
+            self.client.programme_stream_info('12345678901')
+            self.client.channel_stream_info('12345678901')
+        self.assertEqual([(c.kwargs['params']['service'], c.kwargs['params']['prof']) for c in api.call_args_list],
+                         [('ARCHIVE', 'p2'), ('LIVE', 'p4')])
+
+    def test_unavailable_archive_does_not_retry_another_quality(self):
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=MagioGoException(417, 'expired')) as api:
+            with self.assertRaises(MagioGoException):
+                self.client.programme_stream_info('12345678901')
+        self.assertEqual(api.call_count, 1)
+
+    def test_existing_live_quality_cache_is_reused_after_archive_support_is_added(self):
+        key = json.dumps([self.client._deviceType, self.client._device, 'p4', '1'])
+        self.client._data.stream_qualities[key] = {'quality': 'p2', 'expires': time.time() + 3600}
+        ready = MagicMock(status_code=200)
+        ready.__enter__.return_value = ready
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}) as api, \
+                patch('magiogo.requests.get', return_value=ready):
+            self.client.channel_stream_info('1', quality_override='p4')
+        self.assertEqual(api.call_args.kwargs['params']['prof'], 'p2')
+
 
     def test_cached_fallback_is_scoped_to_channel_device_and_requested_quality(self):
         missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)

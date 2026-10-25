@@ -26,9 +26,7 @@ and retrieval of stream and EPG information.
 
 Magio GO IPTV Server works as a web server, listening for stream requests.
 When a request for a particular channel arrives, it retrieves the stream URL from
-Magio servers using the authenticated connection. DASH manifests and segments are
-proxied with the CDN session cookies so FFmpeg-based players can open them.
-HLS streams and unsupported DASH manifests use a redirect to the original URL.
+Magio servers using the authenticated connection and redirects the client to this URL.
 
 Moreover, the app generates and hosts an .m3u8 playlist with the list of 
 channels gathered from Magio, together with URLs pointing to the web server as
@@ -68,27 +66,6 @@ You can also use **OTT_ANDROID** for a mobile profile.
 
 **MAGIO_DEVICE_NAME** sets the device name sent to Magio APIs. The default is Magio IPTV Server.
 
-The HTTP server starts immediately while playlist and guide updates run in the background.
-After a restart, complete cached files are reused until the configured refresh interval expires.
-Failed updates are retried after five minutes; existing files remain available until their replacements are ready.
-Playback requests take priority over guide updates. Magio API calls are spaced at least one second apart,
-with a six-second gap before guide requests and a shared cooldown honoring `Retry-After` after rate limits.
-Guide requests slow down further if Magio still reports a rate limit.
-Guide pages request up to 100 channels per call.
-When a channel's requested quality is unavailable, a verified medium-quality fallback is remembered
-for one hour in `storage`; the requested quality is checked again after that period.
-Verified DASH URLs, CDN cookies and proxy session IDs are saved privately in `storage/dash-sessions.json`.
-They survive restarts for up to 30 minutes of inactivity, scoped to the account, device and quality settings.
-Restored channels fetch a fresh CDN manifest without calling Magio; rejected sessions request a new stream URL.
-Authentication updates are saved atomically only after a complete login or token refresh succeeds.
-Failed attempts preserve the previous session; token files are written with owner-only permissions.
-
-`/health` checks the local HTTP server and is used by the Docker healthcheck. Upstream outages do not
-make the container unhealthy. `/status` reports authentication and guide timestamps, API rate limits,
-CDN proxy errors, and session cache usage without making upstream requests or exposing credentials.
-Counters reset on restart; timestamps use UTC. Successful authentication timestamps are saved with
-the session after the next login or token refresh, so older sessions can initially show `null`.
-
 ### Python
 ```shell script
 # install dependencies
@@ -114,21 +91,6 @@ set MAGIO_DEVICE_NAME=Magio IPTV Server
 flask run --host=0.0.0.0
 ```
 
-On Linux, use `gunicorn --config gunicorn.conf.py app:app` for production.
-The Docker image uses this command with one threaded worker and 16 threads.
-A small `gthread` subclass drains closing sockets in request threads so FFmpeg clients
-cannot stall the worker's accept loop.
-Keep preloading disabled and the worker count at one: the guide scheduler and live session maps
-belong to that worker. Shutdown cancels queued API work and saves CDN sessions before exiting.
-Gunicorn allows up to eight seconds to drain requests; Compose gives the container 15 seconds to stop.
-The Flask command remains available for local development on Windows.
-
-Idle DASH sessions expire after 30 minutes. Their private CDN URL and cookies are kept for another
-24 hours as candidates: opening the channel first fetches a current manifest from CDN, and only
-contacts Magio if that fails. Expired candidates cannot serve segments until revalidated.
-If Magio requests a cooldown longer than five seconds, playback returns `503` with `Retry-After`
-instead of holding the HTTP request open beyond Threadfin's startup timeout. Guide refreshes
-continue to respect the full upstream cooldown.
 
 ### Docker
 ```shell script
@@ -136,16 +98,6 @@ docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=
 ```
 
 ### Docker Compose
-The image runs as UID/GID `10001:10001`. Create writable bind mounts before starting it;
-for existing installations, stop the service and adjust ownership of the two mounted directories.
-Session files should remain private (`0600`, with the storage directory `0700`).
-
-```shell
-mkdir -p storage public
-sudo chown -R 10001:10001 storage public
-sudo chmod 700 storage
-```
-
 ```yaml
 version: '3'
 services:
@@ -166,97 +118,7 @@ services:
             - MAGIO_DEVICE_TYPE=OTT_STB
             - MAGIO_DEVICE_NAME=Magio IPTV Server
         container_name: magiogo-iptv-server
-        stop_grace_period: 15s
 ```
-
-### Threadfin
-
-Select FFmpeg as the Magio playlist's buffer. These FFmpeg options copy video and
-resample audio to avoid repeated audio timestamps when the live DASH manifest updates:
-
-```text
--hide_banner -nostats -loglevel info -analyzeduration 250000 -probesize 262144 -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 2 -rw_timeout 15000000 -i [URL] -sn -dn -c:v copy -c:a aac -b:a 192k -af aresample=async=1:first_pts=0 -muxdelay 0 -muxpreload 0 -flush_packets 1 -f mpegts pipe:1
-```
-
-Keep `-nostats` when using informational logging: FFmpeg's progress output uses carriage
-returns rather than newlines. Threadfin's line reader can stop draining that output after
-several minutes, filling the stderr pipe and blocking playback.
-
-### Xtream API and Jellyfin archive
-
-Enable the optional API with separate local credentials:
-
-```text
-XTREAM_USERNAME=iptv
-XTREAM_PASSWORD=your_random_url_safe_password
-# Optional: address reachable from Jellyfin and its players; otherwise the request address is used.
-XTREAM_PUBLIC_URL=http://your-server:5000
-```
-
-Add these environment variables to the Magio server container. Use a different password from
-your Magio account. The API is disabled unless both credentials are set.
-
-Install [Jellyfin.Xtream](https://github.com/Kevinjil/Jellyfin.Xtream) using its plugin repository:
-
-```text
-https://kevinjil.github.io/Jellyfin.Xtream/repository.json
-```
-
-In the plugin's **Credentials** tab, enter the Magio server's base URL and the local credentials
-above. In **Live TV**, select the channels and enable **Show the catch-up channel to users**.
-The **Xtream Catch-up** section lists channels, days and finished programmes. It is separate from
-Jellyfin's Live TV guide. The plugin also exposes selected live channels; selecting the same channels
-as an existing Threadfin tuner can produce duplicates.
-
-This adapter serves native **DASH (`mpd`)**, which Jellyfin probes and can seek within for archive
-programmes. High-precision epoch timelines are rescaled exactly to avoid integer overflow in FFmpeg's
-seek calculations, preserving the media timestamps and original CDN segment names.
-It does not convert streams to MPEG-TS or HLS; clients requiring `ts` or `m3u8` output
-are unsupported. Existing M3U/XMLTV and Threadfin endpoints continue to work independently.
-
-Implemented endpoints: `/player_api.php`, `/get.php`, `/xmltv.php`, live DASH URLs and
-`/streaming/timeshift.php` (also `/timeshift/{username}/{password}/{duration}/{start}/{channel}.mpd`).
-Times use UTC; duration is in minutes and start uses `YYYY-MM-DD:HH-MM`. Archive requests select
-a complete EPG programme within the channel's archive window, up to seven days. Arbitrary time ranges
-are rejected. `get_simple_data_table` lists available finished programmes; `get_short_epg` lists
-current and upcoming programmes. VOD and series lists are empty.
-
-EPG rows also include an optional `programme_metadata` object with Magio's content type,
-production year, series/episode details and artwork. The cvb941 Xtream Library fork can use
-these fields to match movies and episodes inside Catch-up. Unknown or ambiguous programmes
-retain their EPG details; the extension does not turn the archive into a VOD library.
-
-Channel and per-channel EPG caches are stored privately in `storage/xtream.json` and reused after
-restarts. EPG is fetched on demand and cached for 15 minutes. Failed EPG refreshes reuse cached data
-up to 24 hours old and defer the next attempt, honoring upstream cooldowns; archive availability is
-still checked against the current time. Without a usable cache, the API returns `503` with `Retry-After`.
-Xtream URLs contain the
-local credentials, so use HTTPS or a trusted private network and avoid logging request URLs.
-
-### Tests
-
-CI uses Python 3.15.1 (also recorded in `.python-version`) and runs the complete suite as the application user in the
-production Alpine environment with external networking disabled. The Docker test target adds
-FFmpeg to verify actual audio/video decoding through Gunicorn, CDN cookies and redirects,
-and archive seeking across a backend restart with restored sessions, including epoch-based timelines.
-The production image does not include FFmpeg.
-
-```shell
-docker build --target test -t magio-test .
-docker run --rm --network none magio-test
-```
-
-To verify an installed Threadfin, run this on its Docker host with no other active streams:
-
-```shell
-python3 tools/threadfin_smoke.py --playlist /path/to/threadfin.m3u --channel "Jednotka HD" --backend-url http://127.0.0.1:5678
-```
-
-This restarts the backend container while reading the same Threadfin HTTP connection and
-decoding its video and audio. It checks continued playback, retained FFmpeg process,
-restored CDN sessions and no new Magio API requests. It prints timings without signed URLs or cookies.
-Use `--duration 720` for a twelve-minute stability check. If other channels are active,
-add `--source-channel-id` with the tested channel's Magio ID to scope the FFmpeg process check.
 
 ## Season parsing included
 EPG data for shows from Magio GO contains episode numbers, but for some reason, the season
@@ -275,7 +137,3 @@ some shows, which unfortunately causes DVRs like Plex to consider them as movies
 Sorien - https://github.com/Sorien/plugin.video.iptv.magiogo
 
 rmich - Additional fixes (https://www.xbmc-kodi.cz/prispevek-magio-go-addon?pid=104154#pid104154)
-
-## License
-
-[MIT](LICENSE).
