@@ -43,6 +43,11 @@ After launching the program, the generated files are available at:
 
 `127.0.0.1:5000/magioGuide.xmltv.gz`
 
+Live DASH streams keep all video qualities by default. Append `?quality=best` to a
+channel URL, e.g. `/channel/4598?quality=best`, to keep only the highest resolution
+and bitrate within each video group. Audio tracks are preserved; no transcoding
+is performed. `?quality=all` keeps all qualities. This option does not filter archives.
+
 
 ## Setup instructions
 You can run this program either directly with Python 3.15

@@ -49,6 +49,30 @@ class ArchiveTimelineTests(unittest.TestCase):
             self.assertEqual(template.get('media'), media)
 
 
+class LiveManifestTests(unittest.TestCase):
+    def test_live_manifest_reports_the_best_source_and_bounds_only_advertised_fragments(self):
+        content = '''<MPD type="dynamic"><Period>
+            <AdaptationSet><Representation id="low" height="270" bandwidth="300000"/>
+            <Representation id="high" height="1080" bandwidth="5000000"/></AdaptationSet>
+            <AdaptationSet contentType="audio"><SegmentTemplate media="Fragments(audio=$Time$)">
+            <SegmentTimeline><S t="100" d="4" r="1"/><S d="5"/></SegmentTimeline>
+            </SegmentTemplate><Representation id="slk"/></AdaptationSet></Period></MPD>'''
+        windows = {}
+        result = ET.fromstring(proxy._rewrite_manifest(content, 'https://cdn.test/live.mpd', 'https://proxy.test/seg/', [], windows, prefer_best=True))
+        self.assertEqual([r.get('id') for r in result.findall('.//Representation')], ['high', 'slk'])
+        self.assertEqual(windows, {'audio': 108})
+        self.assertEqual(result.find('.//S').get('t'), '100')
+
+    def test_archive_representations_and_timelines_are_not_filtered(self):
+        content = '''<MPD type="static"><Period><AdaptationSet>
+            <Representation id="low" height="270"/><Representation id="high" height="1080"/>
+            </AdaptationSet></Period></MPD>'''
+        windows = {}
+        result = ET.fromstring(proxy._rewrite_manifest(content, 'https://cdn.test/archive.mpd', 'https://proxy.test/seg/', [], windows, prefer_best=True))
+        self.assertEqual(len(result.findall('.//Representation')), 2)
+        self.assertEqual(windows, {})
+
+
 class DashProxyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -189,6 +213,81 @@ class DashProxyTests(unittest.TestCase):
         self.manifest_root()
         self.assertEqual(self.client.get(path).status_code, 200)
 
+    def test_best_representation_uses_a_separate_manifest_but_reuses_the_cdn_session(self):
+        type(self).manifest = '''<MPD type="dynamic"><Period><AdaptationSet>
+            <Representation height="270"/><Representation height="1080"/>
+            </AdaptationSet></Period></MPD>'''
+        original = self.manifest_root()
+        best = ET.fromstring(self.client.get('/channel/1?quality=best').data)
+        self.assertEqual(len(original.findall('.//Representation')), 2)
+        self.assertEqual([r.get('height') for r in best.findall('.//Representation')], ['1080'])
+        self.assertNotEqual(original.find('BaseURL').text, best.find('BaseURL').text)
+        self.assertEqual(self.stream_info.call_count, 1)
+        self.assertEqual(len(self.manifest_root().findall('.//Representation')), 2)
+
+    def test_quality_defaults_to_all_and_rejects_invalid_values_before_fetching(self):
+        type(self).manifest = '''<MPD type="dynamic"><Period><AdaptationSet>
+            <Representation height="270"/><Representation height="1080"/>
+            </AdaptationSet></Period></MPD>'''
+        invalid = self.client.get('/channel/1?quality=unknown')
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.json['supported'], ['all', 'best'])
+        self.stream_info.assert_not_called()
+        self.assertEqual(self.requests, [])
+        original = self.manifest_root()
+        best = ET.fromstring(self.client.get('/channel/1?quality=best').data)
+        full = ET.fromstring(self.client.get('/channel/1?quality=all').data)
+        self.assertEqual([r.get('height') for r in best.findall('.//Representation')], ['1080'])
+        self.assertEqual([r.get('height') for r in full.findall('.//Representation')], ['270', '1080'])
+        self.assertEqual(original.find('BaseURL').text, full.find('BaseURL').text)
+        self.assertNotEqual(original.find('BaseURL').text, best.find('BaseURL').text)
+        self.assertEqual(self.stream_info.call_count, 1)
+
+    def test_other_public_urls_reuse_the_freshest_source_without_filtering_the_full_manifest(self):
+        type(self).manifest = '''<MPD type="dynamic"><Period><AdaptationSet>
+            <Representation height="270"/><Representation height="1080"/>
+            </AdaptationSet></Period></MPD>'''
+        self.manifest_root()
+        stale = proxy.SEGMENT_SESSIONS[proxy.CHANNEL_SESSIONS[('1', 'http://proxy.test/')]]
+        self.now += proxy.SEGMENT_SESSION_TTL_SECONDS + 1
+        with self.app.test_request_context('/best?quality=best'):
+            best = ET.fromstring(proxy.proxy_manifest(self.stream_info, 'http://native.test', '1').data)
+        stale['manifest_url'] = self.cdn + '/live/rejected.m4s'
+        with self.app.test_request_context('/playlist'):
+            full = ET.fromstring(proxy.proxy_manifest(self.stream_info, 'http://playlist.test', '1').data)
+        self.assertEqual(self.stream_info.call_count, 1)
+        self.assertEqual([r.get('height') for r in best.findall('.//Representation')], ['1080'])
+        self.assertEqual([r.get('height') for r in full.findall('.//Representation')], ['270', '1080'])
+        self.assertNotEqual(best.find('BaseURL').text, full.find('BaseURL').text)
+        self.assertNotIn('/live/rejected.m4s', [path for path, _ in self.requests])
+
+    def test_xtream_live_requires_the_same_explicit_quality_and_preserves_audio(self):
+        from client import Channel
+        from xtream import init_xtream
+
+        type(self).manifest = '''<MPD type="dynamic"><Period>
+            <AdaptationSet><Representation id="low" height="270" bandwidth="300000"/>
+            <Representation id="high" height="1080" bandwidth="3000000"/>
+            <Representation id="best" height="1080" bandwidth="5000000"/></AdaptationSet>
+            <AdaptationSet contentType="audio"><Representation id="slk"/></AdaptationSet>
+            <AdaptationSet contentType="audio"><Representation id="eng"/></AdaptationSet>
+            </Period></MPD>'''
+        channel = Channel()
+        channel.id, channel.name, channel.logo, channel.archive_days = '1', 'Fixture', '', 0
+        magio = Mock()
+        magio.channels.return_value = [channel]
+        magio.channel_stream_info = self.stream_info
+        with patch.dict(os.environ, XTREAM_USERNAME='test', XTREAM_PASSWORD='secret', XTREAM_PUBLIC_URL='http://proxy.test/'):
+            init_xtream(self.app, magio, self.directory.name, self.cache_context)
+            original = self.manifest_root()
+            full = ET.fromstring(self.client.get('/live/test/secret/1.mpd').data)
+            best = ET.fromstring(self.client.get('/live/test/secret/1.mpd?quality=best').data)
+            self.assertEqual(self.client.get('/live/test/secret/1.mpd?quality=invalid').status_code, 400)
+            self.assertEqual(len(ET.fromstring(self.client.get('/channel/1?quality=all').data).findall('.//Representation')), 5)
+        self.assertEqual([r.get('id') for r in original.findall('.//Representation')], ['low', 'high', 'best', 'slk', 'eng'])
+        self.assertEqual([r.get('id') for r in full.findall('.//Representation')], ['low', 'high', 'best', 'slk', 'eng'])
+        self.assertEqual([r.get('id') for r in best.findall('.//Representation')], ['best', 'slk', 'eng'])
+        self.assertEqual(self.stream_info.call_count, 1)
 
     def test_manifest_and_segments_reuse_one_cdn_connection(self):
         path = self.segment_path()

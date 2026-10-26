@@ -183,27 +183,35 @@ def _scale_archive_timeline(template, namespace):
             template.set(name, template.get(name).replace('$Time$', '$Time$' + '0' * (len(str(factor)) - 1)))
 
 
-def _rewrite_manifest(content, manifest_url, proxy_base, origins, live_windows=None):
+def _rewrite_manifest(content, manifest_url, proxy_base, origins, live_windows=None, prefer_best=False):
     root = ET.fromstring(content)
     namespace = root.tag[:-3] if root.tag.endswith('}MPD') else ''
     if root.tag != namespace + 'MPD':
         raise ValueError('Expected an MPD')
-    if root.get('type') == 'dynamic' and live_windows is not None:
-        for template in root.findall('.//' + namespace + 'SegmentTemplate'):
-            track = re.search(r'Fragments\(([^=]+)=\$Time\$\)', template.get('media', ''))
-            if track is None:
-                continue
-            end, last = 0, None
-            for segment in template.findall(namespace + 'SegmentTimeline/' + namespace + 'S'):
-                repeat = int(segment.get('r', 0))
-                if repeat < 0:
-                    last = None
-                    break
-                duration = int(segment.get('d'))
-                last = int(segment.get('t', end)) + duration * repeat
-                end = last + duration
-            if last is not None:
-                live_windows[track[1]] = last
+    if root.get('type') == 'dynamic':
+        for adaptation in root.findall('.//' + namespace + 'AdaptationSet') if prefer_best else []:
+            representations = adaptation.findall(namespace + 'Representation')
+            if len(representations) > 1 and any(rep.get('height') for rep in representations):
+                best = max(representations, key=lambda rep: (int(rep.get('height', 0)), int(rep.get('bandwidth', 0))))
+                for representation in representations:
+                    if representation is not best:
+                        adaptation.remove(representation)
+        if live_windows is not None:
+            for template in root.findall('.//' + namespace + 'SegmentTemplate'):
+                track = re.search(r'Fragments\(([^=]+)=\$Time\$\)', template.get('media', ''))
+                if track is None:
+                    continue
+                end, last = 0, None
+                for segment in template.findall(namespace + 'SegmentTimeline/' + namespace + 'S'):
+                    repeat = int(segment.get('r', 0))
+                    if repeat < 0:
+                        last = None
+                        break
+                    duration = int(segment.get('d'))
+                    last = int(segment.get('t', end)) + duration * repeat
+                    end = last + duration
+                if last is not None:
+                    live_windows[track[1]] = last
     if root.get('type', 'static') == 'static':
         for template in root.findall('.//' + namespace + 'SegmentTemplate'):
             _scale_archive_timeline(template, namespace)
@@ -257,18 +265,36 @@ def _rewrite_manifest(content, manifest_url, proxy_base, origins, live_windows=N
 
 
 def proxy_manifest(stream_info, public_url, channel_id=None):
-    key = (channel_id, public_url) if channel_id is not None else None
+    quality = request.args.get('quality', 'all')
+    if quality not in ('all', 'best'):
+        return {'error': 'invalid_quality', 'supported': ['all', 'best']}, 400
+    prefer_best = quality == 'best'
+    key = (str(channel_id) + ('|best' if prefer_best else ''), public_url) if channel_id is not None else None
     with SEGMENT_SESSIONS_LOCK:
         lock = CHANNEL_LOCKS.setdefault(key, threading.Lock()) if key is not None else threading.Lock()
     with lock:
-        return _fetch_manifest(stream_info, public_url, key)
+        return _fetch_manifest(stream_info, public_url, key, prefer_best)
 
 
-def _fetch_manifest(stream_info, public_url, key):
+def _fetch_manifest(stream_info, public_url, key, prefer_best=False):
     now = time.monotonic()
     with SEGMENT_SESSIONS_LOCK:
         sid = CHANNEL_SESSIONS.get(key)
         cached = SEGMENT_SESSIONS.get(sid)
+        source_sid = None
+        if key is not None and (cached is None or cached['expires'] <= now):
+            source_sid, source = max(
+                ((candidate_sid, SEGMENT_SESSIONS[candidate_sid])
+                 for (channel, _), candidate_sid in CHANNEL_SESSIONS.items()
+                 if str(channel).removesuffix('|best') == key[0].removesuffix('|best')
+                 and candidate_sid in SEGMENT_SESSIONS),
+                key=lambda candidate: candidate[1]['expires'], default=(None, None),
+            )
+            if source is not None and source_sid != sid:
+                cached = dict(source, manifest_time=float('-inf'))
+                sid = uuid.uuid4().hex
+            else:
+                source_sid = None
         if cached and cached['expires'] + STALE_SESSION_RETENTION_SECONDS <= now:
             cached = None
         if cached:
@@ -297,22 +323,22 @@ def _fetch_manifest(stream_info, public_url, key):
                 live_windows = {}
                 manifest = _rewrite_manifest(
                     upstream.content, upstream.url,
-                    f'{public_url.rstrip("/")}/segproxy/{sid}/', origins, live_windows,
+                    f'{public_url.rstrip("/")}/segproxy/{sid}/', origins, live_windows, prefer_best,
                 )
                 cookies = session.cookies.copy()
                 manifest_url = upstream.url
     except requests.RequestException as error:
         current_app.logger.warning('DASH manifest fetch failed: %s', type(error).__name__)
         if cached:
-            _invalidate_session(sid)
-            return _fetch_manifest(stream_info, public_url, key)
+            _invalidate_session(source_sid or sid)
+            return _fetch_manifest(stream_info, public_url, key, prefer_best)
         abort(502)
     except (ET.ParseError, ValueError) as error:
         _record('cdn_errors', error_type=type(error).__name__)
         current_app.logger.warning('DASH manifest fallback: %s', error)
         if cached:
-            _invalidate_session(sid)
-            return _fetch_manifest(stream_info, public_url, key)
+            _invalidate_session(source_sid or sid)
+            return _fetch_manifest(stream_info, public_url, key, prefer_best)
         return redirect(url, code=303)
 
     now = time.monotonic()
@@ -331,7 +357,7 @@ def _fetch_manifest(stream_info, public_url, key):
         }
         if key is not None:
             CHANNEL_SESSIONS[key] = sid
-    if not cached:
+    if not cached or source_sid is not None:
         _record('sessions_created')
     _persist_sessions(force=True)
     return Response(manifest, mimetype='application/dash+xml')
