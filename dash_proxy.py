@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 import threading
 import time
@@ -73,6 +74,7 @@ def init_session_cache(app, path, context):
                 'origins': entry['origins'], 'cookies': cookies,
                 'expires': now + min(remaining, SEGMENT_SESSION_TTL_SECONDS),
                 'manifest': b'', 'manifest_time': float('-inf'),
+                'live_windows': entry.get('live_windows', {}),
             }
         channels = {(channel, public_url): sid for channel, public_url, sid in data['channels'] if sid in sessions}
         with SEGMENT_SESSIONS_LOCK:
@@ -102,6 +104,7 @@ def _persist_sessions(force=False):
             sessions = {
                 sid: {'manifest_url': entry['manifest_url'], 'user_agent': entry['user_agent'],
                       'origins': list(entry['origins']), 'cookies': [dict(cookie.__dict__) for cookie in entry['cookies']],
+                      'live_windows': entry.get('live_windows', {}),
                       'expires': wall + entry['expires'] - now}
                 for sid, entry in SEGMENT_SESSIONS.items()
                 if entry['expires'] + STALE_SESSION_RETENTION_SECONDS > now
@@ -180,11 +183,27 @@ def _scale_archive_timeline(template, namespace):
             template.set(name, template.get(name).replace('$Time$', '$Time$' + '0' * (len(str(factor)) - 1)))
 
 
-def _rewrite_manifest(content, manifest_url, proxy_base, origins):
+def _rewrite_manifest(content, manifest_url, proxy_base, origins, live_windows=None):
     root = ET.fromstring(content)
     namespace = root.tag[:-3] if root.tag.endswith('}MPD') else ''
     if root.tag != namespace + 'MPD':
         raise ValueError('Expected an MPD')
+    if root.get('type') == 'dynamic' and live_windows is not None:
+        for template in root.findall('.//' + namespace + 'SegmentTemplate'):
+            track = re.search(r'Fragments\(([^=]+)=\$Time\$\)', template.get('media', ''))
+            if track is None:
+                continue
+            end, last = 0, None
+            for segment in template.findall(namespace + 'SegmentTimeline/' + namespace + 'S'):
+                repeat = int(segment.get('r', 0))
+                if repeat < 0:
+                    last = None
+                    break
+                duration = int(segment.get('d'))
+                last = int(segment.get('t', end)) + duration * repeat
+                end = last + duration
+            if last is not None:
+                live_windows[track[1]] = last
     if root.get('type', 'static') == 'static':
         for template in root.findall('.//' + namespace + 'SegmentTemplate'):
             _scale_archive_timeline(template, namespace)
@@ -275,9 +294,10 @@ def _fetch_manifest(stream_info, public_url, key):
                 session.cookies.update(cached['cookies'])
             with session.get(url, headers={'User-Agent': user_agent}, timeout=10) as upstream:
                 upstream.raise_for_status()
+                live_windows = {}
                 manifest = _rewrite_manifest(
                     upstream.content, upstream.url,
-                    f'{public_url.rstrip("/")}/segproxy/{sid}/', origins,
+                    f'{public_url.rstrip("/")}/segproxy/{sid}/', origins, live_windows,
                 )
                 cookies = session.cookies.copy()
                 manifest_url = upstream.url
@@ -307,6 +327,7 @@ def _fetch_manifest(stream_info, public_url, key):
             'origins': origins, 'cookies': cookies, 'user_agent': user_agent,
             'expires': now + SEGMENT_SESSION_TTL_SECONDS,
             'manifest_url': manifest_url, 'manifest': manifest, 'manifest_time': now,
+            'live_windows': live_windows,
         }
         if key is not None:
             CHANNEL_SESSIONS[key] = sid
@@ -331,6 +352,11 @@ def segment_proxy(sid, origin_id, subpath):
         session_info['expires'] = now + SEGMENT_SESSION_TTL_SECONDS
 
     target_url = session_info['origins'][origin_id] + '/' + subpath
+    fragment = re.search(r'/Fragments\(([^=]+)=(\d+)\)', subpath)
+    if fragment and int(fragment[2]) > session_info.get('live_windows', {}).get(fragment[1], float('inf')):
+        # DASH demuxers can request an unlisted future fragment and then replay it on reload.
+        time.sleep(.1)
+        return Response(status=404, headers={'Retry-After': '1'})
     if request.query_string:
         target_url += '?' + request.query_string.decode('ascii')
     headers = {'User-Agent': session_info['user_agent'], 'Accept-Encoding': 'identity'}

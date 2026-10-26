@@ -172,6 +172,24 @@ class DashProxyTests(unittest.TestCase):
         self.assertEqual(headers['Cookie'], 'CDNAuth=ok')
         self.assertEqual(headers['User-Agent'], 'Magio review')
 
+    def test_unadvertised_live_fragment_is_not_served_until_the_manifest_advances(self):
+        type(self).manifest = '''<MPD type="dynamic"><Period><AdaptationSet>
+            <SegmentTemplate media="Fragments(audio=$Time$)"><SegmentTimeline><S t="100" d="4" r="2"/>
+            </SegmentTimeline></SegmentTemplate></AdaptationSet></Period></MPD>'''
+        root = self.manifest_root()
+        path = urlsplit(root.find('BaseURL').text).path + 'Fragments(audio=112)'
+        count = len(self.requests)
+        with patch.object(proxy.time, 'sleep', create=True):
+            response = self.client.get(path)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(len(self.requests), count)
+        self.assertEqual(response.headers['Retry-After'], '1')
+        type(self).manifest = self.manifest.replace('t="100"', 't="104"')
+        self.now += 3
+        self.manifest_root()
+        self.assertEqual(self.client.get(path).status_code, 200)
+
+
     def test_manifest_and_segments_reuse_one_cdn_connection(self):
         path = self.segment_path()
         for _ in range(3):

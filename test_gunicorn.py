@@ -69,7 +69,7 @@ from app import app
                             self.fail(logs.read())
                         try:
                             with opener.open(f'http://127.0.0.1:{port}/health', timeout=.5) as response:
-                                if json.load(response) == {'status': 'ok'} and (path / 'guide-started').exists():
+                                if json.load(response) == {'status': 'ok'} and (path / 'guide-started').read_text().endswith('\n'):
                                     break
                         except OSError:
                             pass
