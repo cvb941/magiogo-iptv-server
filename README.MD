@@ -59,8 +59,6 @@ into the XMLTV guide on refresh.
 
 **MAGIO_GUIDE_REFRESH_HOURS** is the number of hours between the guide and channel playlist updates.
 
-**MAGIO_QUALITY** determines the quality of the video stream. Values can be LOW/MEDIUM/HIGH/EXTRA.
-
 **MAGIO_DEVICE_TYPE** sets the device type sent to Magio APIs. The default is OTT_STB.
 You can also use **OTT_ANDROID** for a mobile profile.
 
@@ -80,8 +78,6 @@ set MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
 set MAGIO_GUIDE_DAYS=7
 # optional, default is 12
 set MAGIO_GUIDE_REFRESH_HOURS=12
-# optional, default is HIGH
-set MAGIO_QUALITY=HIGH
 # optional, default is OTT_STB
 set MAGIO_DEVICE_TYPE=OTT_STB
 # optional, default is Magio IPTV Server
@@ -114,7 +110,6 @@ services:
             - MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
             - MAGIO_GUIDE_DAYS=7
             - MAGIO_GUIDE_REFRESH_HOURS=12
-            - MAGIO_QUALITY=HIGH
             - MAGIO_DEVICE_TYPE=OTT_STB
             - MAGIO_DEVICE_NAME=Magio IPTV Server
         container_name: magiogo-iptv-server

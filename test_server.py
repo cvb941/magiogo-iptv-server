@@ -1,5 +1,6 @@
 import importlib
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -48,8 +49,12 @@ class StartupTests(unittest.TestCase):
                     client.channels.side_effect = channels
                     module = None
                     try:
-                        with patch.dict(os.environ, {'MAGIO_USERNAME': 'test', 'MAGIO_PASSWORD': 'test', 'MAGIO_GUIDE_REFRESH_HOURS': '12'}), patch('magiogo.MagioGo', return_value=client), patch('atexit.register'):
+                        with patch.dict(os.environ, {'MAGIO_USERNAME': 'test', 'MAGIO_PASSWORD': 'test', 'MAGIO_GUIDE_REFRESH_HOURS': '12', 'MAGIO_QUALITY': 'REMOVED', 'MAGIO_DEVICE_TYPE': 'OTT_STB', 'MAGIO_DEVICE_NAME': 'Magio IPTV Server'}), patch('magiogo.MagioGo', return_value=client) as create_client, patch('atexit.register'):
                             module = importlib.import_module('app')
+                        create_client.assert_called_once_with('./storage', 'test', 'test', device_type='OTT_STB', device_name='Magio IPTV Server')
+                        expected_context = hashlib.sha256(json.dumps(['test', 'OTT_STB', 'Magio IPTV Server', 'p4']).encode()).hexdigest()
+                        self.assertEqual(module.xtream.context, expected_context)
+                        self.assertEqual(module.app.extensions['dash_session_cache']['context'], expected_context)
                         if state == 'fresh':
                             client.channels.assert_not_called()
                             self.assertIsNotNone(module.last_refresh)
@@ -372,123 +377,41 @@ class MagioRequestTests(unittest.TestCase):
                         thread.join(2)
             self.assertEqual(init.call_count, 1)
 
-    def test_quality_probe_does_not_download_the_manifest_body(self):
-        response = MagicMock(status_code=200)
-        response.__enter__.return_value = response
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}), patch('magiogo.requests.get', return_value=response) as get:
-            stream = self.client.channel_stream_info('1', quality_override='p4')
-        self.assertEqual(stream.url, 'https://cdn.test/live.mpd')
-        self.assertTrue(get.call_args.kwargs['stream'])
-        self.assertEqual(get.call_args.kwargs['timeout'], (5, 15))
-        response.__exit__.assert_called()
+    def test_live_archive_and_recordings_use_fixed_profile_without_probing_cdn(self):
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/stream.mpd'}) as api, patch('magiogo.requests.get') as cdn:
+            live = self.client.channel_stream_info('1')
+            archive = self.client.programme_stream_info('12345678901')
+            recording = self.client.recording_stream_info('recording-1')
+        self.assertEqual([(call.kwargs['params']['service'], call.kwargs['params']['id'], call.kwargs['params']['prof'])
+                          for call in api.call_args_list], [('LIVE', '1', 'p4'), ('ARCHIVE', '12345678901', 'p4'), ('DVR', 'recording-1', 'p4')])
+        self.assertEqual(live.url, 'https://cdn.test/stream.mpd')
+        self.assertEqual(archive.manifest_type, 'mpd')
+        self.assertEqual(recording.manifest_type, 'mpd')
+        cdn.assert_not_called()
 
-    def test_transient_cdn_404_does_not_request_another_stream_url(self):
-        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
-        missing.__enter__.return_value = missing
-        ready.__enter__.return_value = ready
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/high.mpd'}) as api, patch('magiogo.requests.get', side_effect=[missing, ready]), patch('magiogo.time.sleep'):
-            stream = self.client.channel_stream_info('1', quality_override='p4')
-        self.assertEqual(stream.url, 'https://cdn.test/high.mpd')
-        self.assertEqual(api.call_count, 1)
-
-    def test_confirmed_cdn_404_still_falls_back_to_medium_quality(self):
-        missing = MagicMock(status_code=404)
-        missing.__enter__.return_value = missing
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=[{'url': 'https://cdn.test/high.mpd'}, {'url': 'https://cdn.test/medium.mpd'}]) as api, patch('magiogo.requests.get', return_value=missing), patch('magiogo.time.sleep'):
-            stream = self.client.channel_stream_info('1', quality_override='p4')
-        self.assertEqual(stream.url, 'https://cdn.test/medium.mpd')
-        self.assertEqual(api.call_args.kwargs['params']['prof'], 'p2')
-
-    def test_verified_fallback_survives_restart_and_expires_without_sliding(self):
-        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
-        missing.__enter__.return_value = missing
-        ready.__enter__.return_value = ready
+    def test_legacy_fallback_cache_does_not_override_live_or_archive_profile(self):
         self.client._data.access_token = 'saved'
         self.client._data.refresh_token = 'saved-refresh'
         self.client._data.type = 'Bearer'
-        self.client._data.expires_in = int((time.time() + 86400) * 1000)
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=[{'url': 'https://cdn.test/high.mpd'}, {'url': 'https://cdn.test/medium.mpd'}]), patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
-            self.client.channel_stream_info('1', quality_override='p4')
-
-        restarted = MagioGo(self.directory.name, 'test', 'test', quality='p4')
-        with patch.object(restarted, '_get', return_value={'url': 'https://cdn.test/medium.mpd'}) as api, patch('magiogo.requests.get', return_value=ready):
+        self.client._data.expires_in = int((time.time() + 3600) * 1000)
+        self.client._data.stream_qualities = {
+            json.dumps([self.client._deviceType, self.client._device, 'p4', stream_id]):
+                {'quality': 'p2', 'expires': time.time() + 3600}
+            for stream_id in ('1', 'ARCHIVE:12345678901')
+        }
+        self.client._store_session(self.client._data)
+        restarted = MagioGo(self.directory.name, 'test', 'test')
+        with patch.object(restarted, '_get', return_value={'url': 'https://cdn.test/stream.mpd'}) as api:
             restarted.channel_stream_info('1')
-            expires = next(iter(restarted._data.stream_qualities.values()))['expires']
-            restarted.channel_stream_info('1')
-        self.assertEqual([call.kwargs['params']['prof'] for call in api.call_args_list], ['p2', 'p2'])
-        self.assertEqual(next(iter(restarted._data.stream_qualities.values()))['expires'], expires)
-        self.assertEqual(restarted._data.access_token, 'saved')
-        with patch('magiogo.time.time', return_value=expires + 1), patch.object(restarted, '_get', return_value={'url': 'https://cdn.test/high.mpd'}) as api, patch('magiogo.requests.get', return_value=ready):
-            restarted.channel_stream_info('1')
-        self.assertEqual(api.call_args.kwargs['params']['prof'], 'p4')
-        self.assertEqual(restarted._data.stream_qualities, {})
-
-    def test_failed_fallback_is_not_cached(self):
-        missing = MagicMock(status_code=404)
-        missing.__enter__.return_value = missing
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/missing.mpd'}), patch('magiogo.requests.get', return_value=missing), patch('magiogo.time.sleep'):
-            self.client.channel_stream_info('1', quality_override='p4')
-        self.assertEqual(self.client._data.stream_qualities, {})
-
-    def test_archive_quality_fallback_uses_schedule_id_and_is_separate_from_live(self):
-        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
-        missing.__enter__.return_value = missing
-        ready.__enter__.return_value = ready
-        with patch.object(self.client, '_login'), patch.object(self.client, '_store_session'), patch.object(self.client, '_get',
-                side_effect=[{'url': 'https://cdn.test/high.mpd'}, {'url': 'https://cdn.test/medium.mpd'}]) as api, \
-                patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
-            self.client._quality = 'p4'
-            stream = self.client.programme_stream_info('12345678901')
-        self.assertEqual(stream.url, 'https://cdn.test/medium.mpd')
-        self.assertEqual([(c.kwargs['params']['service'], c.kwargs['params']['id'], c.kwargs['params']['prof'])
-                          for c in api.call_args_list], [('ARCHIVE', '12345678901', 'p4'), ('ARCHIVE', '12345678901', 'p2')])
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/ready.mpd'}) as api, \
-                patch('magiogo.requests.get', return_value=ready):
-            self.client.programme_stream_info('12345678901')
-            self.client.channel_stream_info('12345678901')
-        self.assertEqual([(c.kwargs['params']['service'], c.kwargs['params']['prof']) for c in api.call_args_list],
-                         [('ARCHIVE', 'p2'), ('LIVE', 'p4')])
+            restarted.programme_stream_info('12345678901')
+        self.assertEqual([call.kwargs['params']['prof'] for call in api.call_args_list], ['p4', 'p4'])
+        self.assertNotIn('stream_qualities', restarted._data.__dict__)
 
     def test_unavailable_archive_does_not_retry_another_quality(self):
         with patch.object(self.client, '_login'), patch.object(self.client, '_get', side_effect=MagioGoException(417, 'expired')) as api:
             with self.assertRaises(MagioGoException):
                 self.client.programme_stream_info('12345678901')
         self.assertEqual(api.call_count, 1)
-
-    def test_existing_live_quality_cache_is_reused_after_archive_support_is_added(self):
-        key = json.dumps([self.client._deviceType, self.client._device, 'p4', '1'])
-        self.client._data.stream_qualities[key] = {'quality': 'p2', 'expires': time.time() + 3600}
-        ready = MagicMock(status_code=200)
-        ready.__enter__.return_value = ready
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}) as api, \
-                patch('magiogo.requests.get', return_value=ready):
-            self.client.channel_stream_info('1', quality_override='p4')
-        self.assertEqual(api.call_args.kwargs['params']['prof'], 'p2')
-
-
-    def test_cached_fallback_is_scoped_to_channel_device_and_requested_quality(self):
-        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
-        missing.__enter__.return_value = missing
-        ready.__enter__.return_value = ready
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}), patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
-            self.client.channel_stream_info('1', quality_override='p4')
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}) as api, patch('magiogo.requests.get', return_value=ready):
-            self.client.channel_stream_info('2', quality_override='p4')
-            self.client.channel_stream_info('1', quality_override='p5')
-            self.client._deviceType = 'OTT_ANDROID'
-            self.client.channel_stream_info('1', quality_override='p4')
-        self.assertEqual([call.kwargs['params']['prof'] for call in api.call_args_list], ['p4', 'p5', 'p4'])
-
-    def test_missing_cached_fallback_rechecks_requested_quality(self):
-        missing, ready = MagicMock(status_code=404), MagicMock(status_code=200)
-        missing.__enter__.return_value = missing
-        ready.__enter__.return_value = ready
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}), patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
-            self.client.channel_stream_info('1', quality_override='p4')
-        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'url': 'https://cdn.test/live.mpd'}) as api, patch('magiogo.requests.get', side_effect=[missing, missing, ready]), patch('magiogo.time.sleep'):
-            self.client.channel_stream_info('1', quality_override='p4')
-        self.assertEqual([call.kwargs['params']['prof'] for call in api.call_args_list], ['p2', 'p4'])
-        self.assertEqual(self.client._data.stream_qualities, {})
 
 
 class MagioAuthTests(unittest.TestCase):
@@ -543,7 +466,7 @@ class MagioAuthTests(unittest.TestCase):
         self.assertEqual(self.client._auth_headers()['Authorization'], 'Bearer old-access')
         self.assertEqual(list(Path(self.directory.name).iterdir()), [self.path])
 
-    def test_refresh_commits_once_and_preserves_quality_cache_and_other_metadata(self):
+    def test_refresh_drops_retired_quality_cache_and_preserves_other_metadata(self):
         self.responses = [self.authenticated()]
         with patch.object(self.client, '_store_session', wraps=self.client._store_session) as store:
             self.client._login()
@@ -551,7 +474,7 @@ class MagioAuthTests(unittest.TestCase):
         self.assertEqual(self.session.post.call_args.args[0].rsplit('/', 1)[-1], 'tokens')
         self.assertEqual(self.client._data.access_token, 'new-access')
         self.assertEqual(self.client._data.refresh_token, 'new-refresh')
-        self.assertEqual(self.client._data.stream_qualities, self.previous_data['stream_qualities'])
+        self.assertNotIn('stream_qualities', self.client._data.__dict__)
         self.assertEqual(self.client._data.other_metadata, {'keep': True})
         self.assertEqual(json.loads(self.path.read_text()), self.client._data.__dict__)
         self.assertGreater(self.client._data.authenticated_at, time.time() - 10)
@@ -577,7 +500,7 @@ class MagioAuthTests(unittest.TestCase):
         self.assertEqual([call.args[0].rsplit('/', 1)[-1] for call in self.session.post.call_args_list], ['tokens', 'init', 'login'])
         self.assertEqual(self.session.post.call_args.kwargs['headers']['Authorization'], 'Temporary anonymous-access')
         self.assertEqual(self.client._auth_headers()['Authorization'], 'Bearer new-access')
-        self.assertEqual(json.loads(self.path.read_text())['stream_qualities'], self.previous_data['stream_qualities'])
+        self.assertNotIn('stream_qualities', json.loads(self.path.read_text()))
 
     def test_refresh_rate_limit_honors_retry_after_without_registering_a_device(self):
         response = self.reply((429, {}))
@@ -594,7 +517,7 @@ class MagioAuthTests(unittest.TestCase):
         self.client._login()
         self.assertEqual(self.session.post.call_count, 3)
         self.assertEqual(self.client._data.access_token, 'new-access')
-        self.assertEqual(self.client._data.stream_qualities, self.previous_data['stream_qualities'])
+        self.assertNotIn('stream_qualities', self.client._data.__dict__)
 
     def test_failed_login_after_initialization_preserves_old_memory_and_disk(self):
         for failure in (requests.ReadTimeout('login timeout'), {'success': False, 'errorCode': 'INVALID_CREDENTIALS'}):

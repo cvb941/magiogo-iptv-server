@@ -445,7 +445,7 @@ class DashProxyTests(unittest.TestCase):
         self.restart_cache()
         self.assertEqual(self.client.get(path).status_code, 200)
 
-    def test_cache_is_scoped_to_account_device_and_quality(self):
+    def test_cache_is_scoped_to_account_device_and_stream_profile(self):
         proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
         self.segment_path()
         for index in range(len(self.cache_context)):

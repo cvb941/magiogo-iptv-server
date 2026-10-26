@@ -24,6 +24,7 @@ from parse_season_number import parse_season_number
 import datetime
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0'
+STREAM_PROFILE = 'p4'
 
 
 class MagioGoException(Exception):
@@ -44,7 +45,6 @@ class MagioGoSessionData:
         self.refresh_token = ''
         self.expires_in = 0
         self.type = ''
-        self.stream_qualities = {}
         self.authenticated_at = 0
 
 
@@ -62,23 +62,11 @@ class MagioGoRecording:
         self.programme = None
 
 
-class MagioQuality:
-    low = 'p0'
-    medium = 'p2'
-    high = 'p4'
-    extra = 'p5'
-
-    @staticmethod
-    def get(index):
-        return {0: MagioQuality.low, 1: MagioQuality.medium, 2: MagioQuality.high, 3: MagioQuality.extra}.get(index, MagioQuality.high)
-
-
 class MagioGo(IPTVClient):
 
-    def __init__(self, storage_dir, user_name, password, quality=MagioQuality.medium, device_type='OTT_STB', device_name='Magio IPTV Server'):
+    def __init__(self, storage_dir, user_name, password, device_type='OTT_STB', device_name='Magio IPTV Server'):
         self._user_name = user_name
         self._password = password
-        self._quality = quality
         self._device = device_name
         self._deviceType = device_type
         self._appVersion = '4.1.1' if self._deviceType == 'OTT_ANDROID' else '0.0.0'
@@ -303,6 +291,7 @@ class MagioGo(IPTVClient):
                 raise UserNotDefinedException
             saved = copy.deepcopy(self._data)
             self._load_session(saved)
+            saved.__dict__.pop('stream_qualities', None)
             has_tokens = all(isinstance(value, str) and value for value in (saved.access_token, saved.refresh_token, saved.type))
             if has_tokens and type(saved.expires_in) in (int, float) and time.time() * 1000 < saved.expires_in < float('inf'):
                 self._data = saved
@@ -355,66 +344,30 @@ class MagioGo(IPTVClient):
 
         return ret
 
-    def channel_stream_info(self, channel_id, programme_id=None, quality_override=None):
-        return self._stream_info('LIVE', channel_id, quality_override)
+    def channel_stream_info(self, channel_id, programme_id=None):
+        return self._stream_info('LIVE', channel_id)
 
     def programme_stream_info(self, programme_id):
         # ARCHIVE expects the airing's scheduleId, not the reusable programId.
         return self._stream_info('ARCHIVE', programme_id)
 
-    def _stream_info(self, service, stream_id, quality_override=None):
+    def _stream_info(self, service, stream_id):
         self._login(max_wait=5)
-        requested = quality_override or self._quality
-        cache_key = json.dumps([self._deviceType, self._device, requested,
-                                str(stream_id) if service == 'LIVE' else f'{service}:{stream_id}'])
-        with self._auth_lock:
-            cached = self._data.stream_qualities.get(cache_key, {})
-            cache_valid = cached.get('quality') == MagioQuality.medium and cached.get('expires', 0) > time.time()
-            quality = MagioQuality.medium if cache_valid else requested
-        qualities = [quality] if quality == MagioQuality.medium else [quality, MagioQuality.medium]
-        for quality in qualities:
-            resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
+        resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
                          max_wait=5,
                          params={'service': service,
                                  'name': self._device,
                                  'devtype': self._deviceType,
                                  'id': stream_id,
-                                 'prof': quality,
+                                 'prof': STREAM_PROFILE,
                                  'ecid': '',
                                  'drm': 'verimatrix'},
                          headers=self._auth_headers())
-            si = StreamInfo()
-            si.url = resp['url']
-            si.manifest_type = 'mpd' if si.url.find('.mpd') > 0 else 'm3u'
-            si.user_agent = UA
-            if requested == MagioQuality.medium:
-                return si
-
-            # Confirm a fallback before remembering it; a single CDN 404 can be transient.
-            for attempt in range(2):
-                with requests.get(si.url, headers={'User-Agent': si.user_agent}, stream=True, timeout=(5, 15)) as response:
-                    status = response.status_code
-                if status != 404:
-                    break
-                if attempt == 0:
-                    time.sleep(.5)
-            if quality != MagioQuality.medium and status == 404:
-                continue
-            with self._auth_lock:
-                if quality != requested or cache_key in self._data.stream_qualities:
-                    self._data.stream_qualities.pop(cache_key, None)
-                    if quality != requested and 200 <= status < 300:
-                        self._data.stream_qualities = {key: value for key, value in self._data.stream_qualities.items()
-                                                       if value.get('expires', 0) > time.time()}
-                        expires = cached['expires'] if cache_valid else time.time() + 3600
-                        self._data.stream_qualities[cache_key] = {'quality': quality, 'expires': expires}
-                    try:
-                        self._store_session(self._data)
-                    except OSError:
-                        pass  # This optional cache must not interrupt playback.
-            if quality != requested and status == 404 and quality == qualities[0]:
-                return self._stream_info(service, stream_id, requested)
-            return si
+        si = StreamInfo()
+        si.url = resp['url']
+        si.manifest_type = 'mpd' if si.url.find('.mpd') > 0 else 'm3u'
+        si.user_agent = UA
+        return si
 
     @staticmethod
     def _strptime(date_string, format):
@@ -618,7 +571,7 @@ class MagioGo(IPTVClient):
         self._login()
 
         resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
-                         params={'service': 'DVR', 'id': recording_id, 'prof': self._quality, 'ecid': '', 'drm': 'verimatrix'},
+                         params={'service': 'DVR', 'id': recording_id, 'prof': STREAM_PROFILE, 'ecid': '', 'drm': 'verimatrix'},
                          headers=self._auth_headers())
 
         si = StreamInfo()

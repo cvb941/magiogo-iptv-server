@@ -211,11 +211,6 @@ def shutdown():
         _persist_sessions(force=True)
 
 
-# Quality config
-qualityString = os.environ.get('MAGIO_QUALITY', "HIGH")
-qualityMapping = {"LOW": MagioQuality.low, "MEDIUM": MagioQuality.medium, "HIGH": MagioQuality.high, "EXTRA": MagioQuality.extra}
-quality = qualityMapping[qualityString]
-print(f"Stream quality configured to: {qualityString} ({quality})")
 device_type = os.environ.get('MAGIO_DEVICE_TYPE', "OTT_STB")
 print(f"Device type configured to: {device_type}")
 device_name = os.environ.get('MAGIO_DEVICE_NAME', "Magio IPTV Server")
@@ -228,10 +223,11 @@ missing_credentials = [name for name, value in (('MAGIO_USERNAME', magio_usernam
 if missing_credentials:
     raise RuntimeError(f"Missing required environment variable(s): {', '.join(missing_credentials)}")
 
-magio = MagioGo("./storage", magio_username, magio_password, quality, device_type, device_name)
+magio = MagioGo("./storage", magio_username, magio_password, device_type=device_type, device_name=device_name)
 magio.diagnostics = diagnostics
-xtream = init_xtream(app, magio, 'storage', [magio_username, device_type, device_name, quality])
-init_session_cache(app, 'storage/dash-sessions.json', [magio_username, device_type, device_name, quality])
+cache_context = [magio_username, device_type, device_name, STREAM_PROFILE]
+xtream = init_xtream(app, magio, 'storage', cache_context)
+init_session_cache(app, 'storage/dash-sessions.json', cache_context)
 
 # Start HTTP without waiting for Magio; only one refresh can run at a time.
 refresh_hours = int(os.environ.get('MAGIO_GUIDE_REFRESH_HOURS', 12))
