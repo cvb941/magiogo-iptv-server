@@ -231,6 +231,8 @@ def init_xtream(app, magio, storage_dir, context):
     @api.route('/streaming/timeshift.php')
     @api.route('/timeshift/<username>/<password>/<duration>/<start>/<int:channel_id>')
     @api.route('/timeshift/<username>/<password>/<duration>/<start>/<int:channel_id>.mpd')
+    # AIOStreams Xtream builtin always requests catch-up as .ts; answer with the DASH manifest anyway.
+    @api.route('/timeshift/<username>/<password>/<duration>/<start>/<int:channel_id>.ts')
     def timeshift(username=None, password=None, duration=None, start=None, channel_id=None):
         try:
             start = dt.datetime.strptime(start or request.args.get('start', ''), '%Y-%m-%d:%H-%M').replace(tzinfo=dt.UTC).timestamp()
