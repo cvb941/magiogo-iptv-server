@@ -1,5 +1,5 @@
 # Magio GO IPTV Server
-This server application generates an .m3u8 playlist and XMLTV guide from the
+This server application generates an .m3u8 playlist, an XMLTV guide and an Xtream API from the
 online TV Magio GO from Slovak Telekom.
 
 A valid subscription to the Magio GO service is required. The application authenticates with Magio
