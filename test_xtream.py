@@ -318,6 +318,17 @@ class ArchiveApiTests(unittest.TestCase):
             self.assertEqual([p.metadata['schedule_id'] for p in first], ['1'])
             self.assertEqual([p.metadata['schedule_id'] for p in second], ['2'])
 
+    def test_guide_days_survive_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            today = dt.datetime.now(dt.UTC).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+            magio = MagioGo(directory, 'test', 'test')
+            magio._store_guide_day(today, [{'scheduleId': 1}])
+            magio._store_guide_day(today - dt.timedelta(days=30), [{'scheduleId': 2}])
+            restarted = MagioGo(directory, 'test', 'test')
+            self.assertEqual(list(restarted._epg_days), [today])
+            self.assertEqual(restarted._epg_days[today][1], [{'scheduleId': 1}])
+            self.assertFalse(restarted._guide_day_stale(today, dt.datetime.now(dt.UTC).replace(tzinfo=None)))
+
     def test_channel_epg_paginates_filters_channels_and_preserves_schedule_id(self):
         with tempfile.TemporaryDirectory() as directory:
             magio = MagioGo(directory, 'test', 'test')

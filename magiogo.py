@@ -1,4 +1,5 @@
 import datetime
+import os
 import random
 import time
 import requests
@@ -84,6 +85,8 @@ class MagioGo(IPTVClient):
         self._guide_lock = threading.Lock()
         self._guide_filler = None
         super().__init__(storage_dir, '%s.session' % self._user_name)
+        self._guide_dir = os.path.join(self._storage_path, 'guide')
+        self._epg_days = self._load_guide_days()
 
     def _check_response(self, resp):
         if resp.get('success', False):
@@ -403,8 +406,8 @@ class MagioGo(IPTVClient):
             current_day = from_date + datetime.timedelta(n)
             cached = self._epg_days.get(current_day)
             # Future days are fetched once; today is refetched, but not again when a failed refresh is retried.
-            if cached is None or current_day <= today and time.monotonic() - cached[0] > 3600:
-                self._epg_days[current_day] = (time.monotonic(), self._epg_day(current_day))
+            if cached is None or current_day <= today and self._guide_day_stale(current_day, now):
+                self._store_guide_day(current_day, self._epg_day(current_day))
 
             for p in self._epg_days[current_day][1]:
                 channel = str(p['channel']['id'])
@@ -437,6 +440,50 @@ class MagioGo(IPTVClient):
                 airings.extend(i['programs'])
         return airings
 
+    def _guide_file(self, day):
+        return os.path.join(self._guide_dir, day.strftime('%Y-%m-%d') + '.json')
+
+    def _oldest_guide_day(self):
+        today = datetime.datetime.now(datetime.UTC).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+        return today - datetime.timedelta(days=GUIDE_ARCHIVE_DAYS + 2)
+
+    def _load_guide_days(self):
+        days = {}
+        try:
+            names = os.listdir(self._guide_dir)
+        except OSError:
+            return days
+        oldest = self._oldest_guide_day()
+        for name in names:
+            path = os.path.join(self._guide_dir, name)
+            try:
+                day = datetime.datetime.strptime(name, '%Y-%m-%d.json')
+                if day < oldest:
+                    os.remove(path)
+                    continue
+                with open(path, encoding='utf-8') as f:
+                    airings = json.load(f)
+                age = time.time() - os.path.getmtime(path)
+            except (OSError, ValueError):
+                continue
+            days[day] = (time.monotonic() - age, airings)
+        return days
+
+    def _store_guide_day(self, day, airings):
+        self._epg_days[day] = (time.monotonic(), airings)
+        try:
+            os.makedirs(self._guide_dir, mode=0o700, exist_ok=True)
+            path = self._guide_file(day)
+            with open(path + '.tmp', 'w', encoding='utf-8') as f:
+                json.dump(airings, f)
+            os.replace(path + '.tmp', path)
+            oldest = self._oldest_guide_day().strftime('%Y-%m-%d.json')
+            for name in os.listdir(self._guide_dir):
+                if name.endswith('.json') and name < oldest:
+                    os.remove(os.path.join(self._guide_dir, name))
+        except OSError as error:
+            logging.getLogger(__name__).warning('Could not save guide day (%s)', type(error).__name__)
+
     def _guide_days_needed(self, date_from, date_to):
         first = date_from.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
         last = date_to.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
@@ -453,7 +500,7 @@ class MagioGo(IPTVClient):
         try:
             for day in days:
                 self._login()
-                self._epg_days[day] = (time.monotonic(), self._epg_day(day))
+                self._store_guide_day(day, self._epg_day(day))
         except CancelledError:
             pass
         except Exception as error:
