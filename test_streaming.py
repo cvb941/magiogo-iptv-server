@@ -98,6 +98,7 @@ MagioGo._request = no_api
 MagioGo.channels = channels
 MagioGo.epg = lambda self, *args: {}
 MagioGo.channel_epg = epg
+MagioGo.guide_window = epg
 MagioGo.channel_stream_info = stream
 MagioGo.programme_stream_info = lambda self, schedule_id: stream(self, 'archive')
 from app import app
