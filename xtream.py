@@ -157,6 +157,15 @@ def init_xtream(app, magio, storage_dir, context):
     def public_url():
         return (os.environ.get('XTREAM_PUBLIC_URL') or request.host_url).rstrip('/')
 
+    def start_over_or_live(channel, programme):
+        # Magio serves the airing on now from its start (seekable up to now) as ARCHIVE; plain live otherwise.
+        if programme['schedule_id']:
+            try:
+                return magio.programme_stream_info(programme['schedule_id'])
+            except Exception as error:
+                logging.getLogger(__name__).warning('Start-over unavailable (%s); playing live', type(error).__name__)
+        return magio.channel_stream_info(str(channel['id']))
+
     def has_archive(channel, programme):
         now = time.time()
         return bool(programme['schedule_id'] and channel['archive_days'] and
@@ -251,7 +260,8 @@ def init_xtream(app, magio, storage_dir, context):
         programme = next((p for p in service.programmes(channel) if int(p['start'] // 60) == int(start // 60)), None)
         # Stremio and AIOStreams ask for the programme on air as catch-up; there is none yet, so play live.
         if programme is not None and programme['start'] <= time.time() < programme['end']:
-            return proxy_manifest(lambda: magio.channel_stream_info(str(channel['id'])), public_url(), str(channel['id']))
+            return proxy_manifest(lambda: start_over_or_live(channel, programme), public_url(),
+                                  f"startover:{channel['id']}:{programme['schedule_id']}")
         if programme is None or not has_archive(channel, programme):
             return {'error': 'archive_unavailable'}, 404
         if abs(minutes - math.ceil((programme['end'] - programme['start']) / 60)) > 1:

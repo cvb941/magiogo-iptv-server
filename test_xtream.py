@@ -239,7 +239,11 @@ class XtreamTests(unittest.TestCase):
         with patch.object(self.service, 'programmes', return_value=[row]),                 patch.object(self.service, 'channel', return_value={'id': '4099', 'archive_days': 7}),                 patch('xtream.proxy_manifest', return_value=Response('<MPD/>', mimetype='application/dash+xml')) as manifest:
             response = self.client.get(f"/timeshift/iptv/local-secret/60/{start.strftime('%Y-%m-%d:%H-%M')}/4099.ts")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(manifest.call_args.args[2], '4099')
+        self.assertEqual(manifest.call_args.args[2], 'startover:4099:9')
+        with patch.object(self.magio, 'programme_stream_info', side_effect=RuntimeError()), \
+                patch.object(self.magio, 'channel_stream_info') as live:
+            manifest.call_args.args[0]()
+        live.assert_called_with('4099')
 
     def test_live_alias_playlist_and_unsupported_output(self):
         with patch('xtream.proxy_manifest', return_value=Response('<MPD/>', mimetype='application/dash+xml')) as manifest:
