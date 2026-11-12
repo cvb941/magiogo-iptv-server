@@ -64,7 +64,7 @@ class XtreamTests(unittest.TestCase):
         response = self.api()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json['user_info']['auth'], 1)
-        self.assertEqual(response.json['user_info']['allowed_output_formats'], ['mpd'])
+        self.assertEqual(response.json['user_info']['allowed_output_formats'], ['mpd', 'ts'])
         self.assertEqual(response.json['server_info']['url'], 'iptv.test')
         self.assertEqual(response.json['server_info']['port'], '5678')
         self.assertEqual(response.json['server_info']['timezone'], 'UTC')
@@ -235,10 +235,11 @@ class XtreamTests(unittest.TestCase):
         with patch('xtream.proxy_manifest', return_value=Response('<MPD/>', mimetype='application/dash+xml')) as manifest:
             self.assertEqual(self.client.get('/iptv/local-secret/4099').status_code, 200)
             self.assertEqual(self.client.get('/live/iptv/local-secret/4099.mpd').status_code, 200)
+            self.assertEqual(self.client.get('/live/iptv/local-secret/4099.ts').status_code, 200)
             self.assertEqual(manifest.call_args.args[2], '4099')
         playlist = self.client.get('/get.php', query_string=self.query)
         self.assertIn('/live/iptv/local-secret/4099.mpd', playlist.get_data(as_text=True))
-        self.assertEqual(self.client.get('/live/iptv/local-secret/4099.ts').status_code, 415)
+        self.assertEqual(self.client.get('/live/iptv/local-secret/4099.m3u8').status_code, 415)
         self.assertEqual(self.client.get('/get.php', query_string=dict(self.query, output='ts')).status_code, 400)
 
 

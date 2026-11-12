@@ -173,7 +173,7 @@ def init_xtream(app, magio, storage_dir, context):
                 'user_info': {'username': os.environ['XTREAM_USERNAME'], 'password': os.environ['XTREAM_PASSWORD'],
                               'auth': 1, 'status': 'Active', 'exp_date': None, 'is_trial': '0',
                               'active_cons': '0', 'created_at': '0', 'max_connections': '0',
-                              'allowed_output_formats': ['mpd']},
+                              'allowed_output_formats': ['mpd', 'ts']},
                 'server_info': {'url': url.hostname, 'port': str(url.port or (443 if url.scheme == 'https' else 80)),
                                 'https_port': str(url.port or 443) if url.scheme == 'https' else '',
                                 'server_protocol': url.scheme, 'rtmp_port': '0', 'timezone': 'UTC',
@@ -219,6 +219,8 @@ def init_xtream(app, magio, storage_dir, context):
     @api.route('/<username>/<password>/<int:channel_id>.mpd')
     @api.route('/live/<username>/<password>/<int:channel_id>')
     @api.route('/live/<username>/<password>/<int:channel_id>.mpd')
+    # AIOStreams only offers m3u8/ts for Xtream live; answer .ts with the DASH manifest, as for catch-up.
+    @api.route('/live/<username>/<password>/<int:channel_id>.ts')
     def live(username, password, channel_id):
         service.channel(channel_id)
         return proxy_manifest(lambda: magio.channel_stream_info(str(channel_id)), public_url(), str(channel_id))
