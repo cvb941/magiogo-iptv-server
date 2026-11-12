@@ -243,6 +243,38 @@ class MagioRequestTests(unittest.TestCase):
             self.client.epg([], datetime(2026, 1, 1), datetime(2026, 1, 1))
         self.assertEqual([call.kwargs['params']['offset'] for call in api.call_args_list], [0, 20])
 
+    def test_guide_refresh_fetches_only_today_and_new_days(self):
+        today = datetime.now(timezone.utc).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+        clock = [1000]
+
+        def fetched_days(start, end):
+            with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value={'items': [], 'totalCount': 0}) as api, patch('magiogo.time.monotonic', side_effect=lambda: clock[0]):
+                self.client.epg([], start, end)
+            return [call.kwargs['params']['filter'][13:23] for call in api.call_args_list]
+
+        day = lambda n: (today + timedelta(days=n)).strftime('%Y-%m-%d')
+        self.assertEqual(fetched_days(today, today + timedelta(days=2)), [day(0), day(1), day(2)])
+        self.assertEqual(fetched_days(today, today + timedelta(days=2)), [])
+        clock[0] += 12 * 3600
+        self.assertEqual(fetched_days(today, today + timedelta(days=3)), [day(0), day(3)])
+        self.assertEqual(fetched_days(today + timedelta(days=1), today + timedelta(days=3)), [])
+        self.assertNotIn(today, self.client._epg_days)
+
+    def test_cached_guide_days_recompute_archive_flags(self):
+        start = (datetime.now(timezone.utc) + timedelta(minutes=1)).replace(tzinfo=None, microsecond=0)
+        response = {'items': [{'programs': [{
+            'channel': {'id': 1}, 'program': {}, 'duration': 60,
+            'startTimeUTC': int(start.replace(tzinfo=timezone.utc).timestamp() * 1000),
+            'endTimeUTC': int((start + timedelta(minutes=1)).replace(tzinfo=timezone.utc).timestamp() * 1000),
+        }]}], 'totalCount': 1}
+        with patch.object(self.client, '_login'), patch.object(self.client, '_get', return_value=response) as api, patch.object(self.client, '_programme_data', side_effect=lambda _: Mock()):
+            self.assertFalse(self.client.epg(['1'], start, start)['1'][0].is_replyable)
+            with patch('magiogo.datetime.datetime') as clock:
+                clock.now.return_value = (start + timedelta(minutes=5)).replace(tzinfo=timezone.utc)
+                clock.fromtimestamp = datetime.fromtimestamp
+                self.assertTrue(self.client.epg(['1'], start, start)['1'][0].is_replyable)
+        self.assertEqual(api.call_count, 1)
+
     def test_playback_overtakes_waiting_guide_requests(self):
         waiting, playback, release = threading.Event(), threading.Event(), threading.Event()
         order = []

@@ -79,6 +79,7 @@ class MagioGo(IPTVClient):
         self._api_next_request = 0
         self._api_guide_interval = 6
         self._api_background_after = time.monotonic() + self._api_guide_interval
+        self._epg_days = {}
         super().__init__(storage_dir, '%s.session' % self._user_name)
 
     def _check_response(self, resp):
@@ -389,37 +390,48 @@ class MagioGo(IPTVClient):
         now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
 
         days = int((to_date - from_date).days)
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        self._epg_days = {day: cached for day, cached in self._epg_days.items() if day >= from_date}
 
         for n in range(days):
             progress((100 // days) * (n + 1))
 
             current_day = from_date + datetime.timedelta(n)
-            filter = 'startTime=ge=%sT00:00:00.000Z;startTime=le=%sT00:59:59.999Z' % (
-                current_day.strftime("%Y-%m-%d"), (current_day + datetime.timedelta(days=1)).strftime("%Y-%m-%d"))
+            cached = self._epg_days.get(current_day)
+            # Future days are fetched once; today is refetched, but not again when a failed refresh is retried.
+            if cached is None or current_day <= today and time.monotonic() - cached[0] > 3600:
+                self._epg_days[current_day] = (time.monotonic(), self._epg_day(current_day))
 
-            fetch_more = True
-            offset = 0
-            while fetch_more:
-                resp = self._get('https://skgo.magio.tv/v2/television/epg',
-                                 params={'filter': filter, 'limit': '100', 'offset': offset, 'list': 'LIVE'},
-                                 headers=self._auth_headers(), background=True)
+            for p in self._epg_days[current_day][1]:
+                channel = str(p['channel']['id'])
 
-                offset += len(resp['items'])
-                fetch_more = bool(resp['items']) and offset < resp['totalCount']
+                if channel not in channels:
+                    continue
 
-                for i in resp['items']:
-                    for p in i['programs']:
-                        channel = str(p['channel']['id'])
+                if channel not in ret:
+                    ret[channel] = []
 
-                        if channel not in channels:
-                            continue
-
-                        if channel not in ret:
-                            ret[channel] = []
-
-                        ret[channel].append(self._scheduled_programme(p, now))
+                ret[channel].append(self._scheduled_programme(p, now))
 
         return ret
+
+    def _epg_day(self, day):
+        filter = 'startTime=ge=%sT00:00:00.000Z;startTime=le=%sT00:59:59.999Z' % (
+            day.strftime("%Y-%m-%d"), (day + datetime.timedelta(days=1)).strftime("%Y-%m-%d"))
+        airings = []
+        fetch_more = True
+        offset = 0
+        while fetch_more:
+            resp = self._get('https://skgo.magio.tv/v2/television/epg',
+                             params={'filter': filter, 'limit': '100', 'offset': offset, 'list': 'LIVE'},
+                             headers=self._auth_headers(), background=True)
+
+            offset += len(resp['items'])
+            fetch_more = bool(resp['items']) and offset < resp['totalCount']
+
+            for i in resp['items']:
+                airings.extend(i['programs'])
+        return airings
 
     def channel_epg(self, channel_id, date_from, date_to):
         channel_id = str(channel_id)
