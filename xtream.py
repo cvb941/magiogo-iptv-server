@@ -202,7 +202,9 @@ def init_xtream(app, magio, storage_dir, context):
             if action == 'get_short_epg':
                 rows = [p for p in rows if p['end'] > time.time()][:limit]
             else:
-                rows = [p for p in rows if has_archive(channel, p)]
+                # The full table, like other Xtream servers: catch-up plus what is on now and later,
+                # which AIOStreams/Stremio need to list and play the programme on air.
+                rows = [p for p in rows if has_archive(channel, p) or p['end'] > time.time()]
             return {'epg_listings': [{
                 'id': str(p['id']), 'epg_id': channel['id'], 'channel_id': channel['id'], 'lang': 'sk',
                 'title': base64.b64encode(p['title'].encode()).decode(),

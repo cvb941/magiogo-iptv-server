@@ -92,7 +92,7 @@ class XtreamTests(unittest.TestCase):
                                              self.programme(-10), self.programme(120)]
         response = self.api('get_simple_data_table', stream_id='4099')
         rows = response.json['epg_listings']
-        self.assertEqual(len(rows), 1)
+        self.assertEqual([(r['has_archive'], r['now_playing']) for r in rows], [(1, 0), (0, 1), (0, 0)])
         self.assertEqual(base64.b64decode(rows[0]['title']).decode(), past.title)
         self.assertEqual(base64.b64decode(rows[0]['description']).decode(), past.description)
         self.assertEqual(rows[0]['has_archive'], 1)
