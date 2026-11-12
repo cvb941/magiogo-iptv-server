@@ -3,6 +3,7 @@ import datetime as dt
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,7 @@ class XtreamTests(unittest.TestCase):
         channel.id, channel.name, channel.logo, channel.archive_days = '4099', 'Jednotka HD', 'https://image.test/logo.png', 7
         self.magio.channels = Mock(return_value=[channel])
         self.magio.channel_epg = Mock(return_value=[])
+        self.magio.guide_window = self.magio.channel_epg
         self.app = Flask(__name__)
         self.service = init_xtream(self.app, self.magio, self.directory.name, self.context)
         self.client = self.app.test_client()
@@ -158,7 +160,10 @@ class XtreamTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             response = self.client.get(f'/timeshift/iptv/local-secret/60/{start}/4099.mpd')
             self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.magio.programme_stream_info.call_count, 2)
+            response = self.client.get(f'/timeshift/iptv/local-secret/60/{start}/4099.ts')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.mimetype, 'application/dash+xml')
+        self.assertEqual(self.magio.programme_stream_info.call_count, 3)
         self.magio.programme_stream_info.assert_called_with('12345678901')
 
     def test_invalid_future_expired_and_partial_archive_requests_are_rejected(self):
@@ -264,6 +269,39 @@ class ArchiveApiTests(unittest.TestCase):
                 self.assertEqual(programme.episodeNo, None if expected == 'movie' else 5)
                 if expected == 'episode':
                     self.assertEqual(programme.metadata['series_name'], title.split(' ')[0] if season else title)
+
+    def test_guide_window_serves_all_channels_from_one_paced_day_fetch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            magio = MagioGo(directory, 'test', 'test')
+            data = {'programId': 77, 'title': 'Správy', 'episodeTitle': '', 'description': '',
+                    'programValue': {'episodeId': None, 'seasonNumber': None, 'creationYear': None},
+                    'images': [], 'programRole': {'directors': [], 'actors': []}, 'programCategory': None}
+            now = dt.datetime.now(dt.UTC)
+            def airing(channel, hours, schedule):
+                return {'channel': {'id': channel}, 'scheduleId': schedule, 'program': data,
+                        'startTimeUTC': int((now + dt.timedelta(hours=hours)).timestamp() * 1000),
+                        'endTimeUTC': int((now + dt.timedelta(hours=hours + 1)).timestamp() * 1000), 'duration': 3600}
+            shared = airing(4099, -1, 1)
+            release = threading.Event()
+            def day(day):
+                release.wait(5)
+                return [shared, airing(4146, -1, 2), airing(4099, -30 * 24, 3)]
+            window = (now - dt.timedelta(days=1), now + dt.timedelta(days=1))
+            with patch.object(magio, '_login'), patch.object(magio, '_epg_day', side_effect=day) as fetch:
+                with self.assertRaises(ApiCooldownError):
+                    magio.guide_window('4099', *window)
+                release.set()
+                for _ in range(100):
+                    if magio._guide_filler is None:
+                        break
+                    time.sleep(0.01)
+                first = magio.guide_window('4099', *window)
+                second = magio.guide_window('4146', *window)
+            self.assertEqual(fetch.call_count, 3)
+            today = now.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+            self.assertEqual(fetch.call_args_list[0].args[0], today)
+            self.assertEqual([p.metadata['schedule_id'] for p in first], ['1'])
+            self.assertEqual([p.metadata['schedule_id'] for p in second], ['2'])
 
     def test_channel_epg_paginates_filters_channels_and_preserves_schedule_id(self):
         with tempfile.TemporaryDirectory() as directory:

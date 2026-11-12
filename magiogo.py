@@ -25,6 +25,7 @@ import datetime
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0'
 STREAM_PROFILE = 'p4'
+GUIDE_ARCHIVE_DAYS = 7
 
 
 class MagioGoException(Exception):
@@ -80,6 +81,8 @@ class MagioGo(IPTVClient):
         self._api_guide_interval = 6
         self._api_background_after = time.monotonic() + self._api_guide_interval
         self._epg_days = {}
+        self._guide_lock = threading.Lock()
+        self._guide_filler = None
         super().__init__(storage_dir, '%s.session' % self._user_name)
 
     def _check_response(self, resp):
@@ -391,7 +394,8 @@ class MagioGo(IPTVClient):
 
         days = int((to_date - from_date).days)
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        self._epg_days = {day: cached for day, cached in self._epg_days.items() if day >= from_date}
+        self._epg_days = {day: cached for day, cached in self._epg_days.items()
+                          if day >= from_date - datetime.timedelta(days=GUIDE_ARCHIVE_DAYS + 1)}
 
         for n in range(days):
             progress((100 // days) * (n + 1))
@@ -432,6 +436,59 @@ class MagioGo(IPTVClient):
             for i in resp['items']:
                 airings.extend(i['programs'])
         return airings
+
+    def _guide_days_needed(self, date_from, date_to):
+        first = date_from.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+        last = date_to.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+        return [first + datetime.timedelta(days=n) for n in range((last - first).days + 1)]
+
+    def _guide_day_stale(self, day, now):
+        cached = self._epg_days.get(day)
+        if cached is None:
+            return True
+        # Finished days never change; today and later are refreshed hourly, like the XMLTV guide.
+        return day + datetime.timedelta(days=1, hours=2) > now and time.monotonic() - cached[0] > 3600
+
+    def _fill_guide(self, days):
+        try:
+            for day in days:
+                self._login()
+                self._epg_days[day] = (time.monotonic(), self._epg_day(day))
+        except CancelledError:
+            pass
+        except Exception as error:
+            logging.getLogger(__name__).warning('Background guide fetch failed (%s)', type(error).__name__)
+        finally:
+            with self._guide_lock:
+                self._guide_filler = None
+
+    def guide_window(self, channel_id, date_from, date_to):
+        # Serve one channel from the guide fetched a day at a time for every channel at once, shared
+        # with the XMLTV refresh. Missing days are fetched by one paced background thread instead of
+        # once per channel, which runs into Magio's rate limit with ~150 channels.
+        now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        days = self._guide_days_needed(date_from, date_to)
+        with self._guide_lock:
+            stale = [day for day in days if self._guide_day_stale(day, now)]
+            if stale and self._guide_filler is None:
+                stale.sort(key=lambda day: abs((day - today).days))
+                self._guide_filler = threading.Thread(target=self._fill_guide, args=(stale,), daemon=True,
+                                                      name='xtream-guide')
+                self._guide_filler.start()
+            if today in days and today not in self._epg_days:
+                raise ApiCooldownError(30)
+            airings = [a for day in days if day in self._epg_days for a in self._epg_days[day][1]
+                       if str(a['channel']['id']) == str(channel_id)]
+        programmes, seen = [], set()
+        start_ms, end_ms = date_from.timestamp() * 1000, date_to.timestamp() * 1000
+        for airing in airings:
+            identity = (airing.get('scheduleId'), airing['startTimeUTC'])
+            if identity in seen or airing['endTimeUTC'] < start_ms or airing['startTimeUTC'] > end_ms:
+                continue
+            seen.add(identity)
+            programmes.append(self._scheduled_programme(airing, now))
+        return sorted(programmes, key=lambda p: p.start_time)
 
     def channel_epg(self, channel_id, date_from, date_to):
         channel_id = str(channel_id)

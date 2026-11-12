@@ -88,7 +88,7 @@ class Xtream:
             if age > 15 * 60 and (time.time() >= cached.get('retry_at', 0) or age > 24 * 3600):
                 now = dt.datetime.now(dt.UTC)
                 try:
-                    programmes = self.magio.channel_epg(key, now - dt.timedelta(days=channel['archive_days']), now + dt.timedelta(days=1))
+                    programmes = self.magio.guide_window(key, now - dt.timedelta(days=channel['archive_days']), now + dt.timedelta(days=1))
                 except (IPTVException, MagioGoException, requests.RequestException) as error:
                     if not cached.get('programmes') or time.time() - cached['at'] > 24 * 3600:
                         raise

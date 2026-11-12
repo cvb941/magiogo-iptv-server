@@ -258,7 +258,8 @@ class MagioRequestTests(unittest.TestCase):
         clock[0] += 12 * 3600
         self.assertEqual(fetched_days(today, today + timedelta(days=3)), [day(0), day(3)])
         self.assertEqual(fetched_days(today + timedelta(days=1), today + timedelta(days=3)), [])
-        self.assertNotIn(today, self.client._epg_days)
+        # Past days stay cached for the Xtream archive guide.
+        self.assertIn(today, self.client._epg_days)
 
     def test_cached_guide_days_recompute_archive_flags(self):
         start = (datetime.now(timezone.utc) + timedelta(minutes=1)).replace(tzinfo=None, microsecond=0)
