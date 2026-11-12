@@ -368,6 +368,25 @@ class MagioRequestTests(unittest.TestCase):
         self.assertEqual(counters['api_errors'], 3)
         self.assertEqual(counters['api_rate_limits'], 3)
 
+    def test_playback_retries_a_transient_rate_limit_quickly(self):
+        elapsed, requested_at = [0], []
+        session = MagicMock()
+        session.__enter__.return_value = session
+        statuses = iter((429, 200))
+
+        def get(url, **kwargs):
+            requested_at.append(elapsed[0])
+            response = MagicMock(status_code=next(statuses), headers={'Retry-After': '60'})
+            response.__enter__.return_value = response
+            response.json.return_value = {'success': True}
+            return response
+
+        session.get.side_effect = get
+        with patch.object(self.client, '_request', return_value=session), patch('magiogo.time.monotonic', side_effect=lambda: elapsed[0]), patch.object(self.client._api_condition, 'wait', side_effect=lambda delay=None: elapsed.__setitem__(0, elapsed[0] + delay)):
+            self.client._get('stream-url', max_wait=5, playback=True)
+        self.assertEqual(requested_at, [0, 4])
+        self.assertGreaterEqual(self.client._api_background_after, 60)
+
     def test_guide_honors_full_retry_after_and_reduces_its_request_rate(self):
         elapsed, requested_at = [0], []
         self.client._api_background_after = 6

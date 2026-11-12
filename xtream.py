@@ -15,7 +15,7 @@ from urllib.parse import quote, urlencode, urlsplit
 
 import requests
 from flask import Blueprint, Response, current_app, request, send_file
-from werkzeug.exceptions import NotFound
+from werkzeug.exceptions import HTTPException, NotFound
 
 from client import IPTVException
 from dash_proxy import proxy_manifest
@@ -260,8 +260,15 @@ def init_xtream(app, magio, storage_dir, context):
         programme = next((p for p in service.programmes(channel) if int(p['start'] // 60) == int(start // 60)), None)
         # Stremio and AIOStreams ask for the programme on air as catch-up; there is none yet, so play live.
         if programme is not None and programme['start'] <= time.time() < programme['end']:
-            return proxy_manifest(lambda: start_over_or_live(channel, programme), public_url(),
-                                  f"startover:{channel['id']}:{programme['schedule_id']}")
+            try:
+                return proxy_manifest(lambda: start_over_or_live(channel, programme), public_url(),
+                                      f"startover:{channel['id']}:{programme['schedule_id']}")
+            except HTTPException as error:
+                if error.code != 502:
+                    raise
+                logging.getLogger(__name__).warning('Start-over manifest unavailable; playing live')
+                return proxy_manifest(lambda: magio.channel_stream_info(str(channel['id'])), public_url(),
+                                      str(channel['id']))
         if programme is None or not has_archive(channel, programme):
             return {'error': 'archive_unavailable'}, 404
         if abs(minutes - math.ceil((programme['end'] - programme['start']) / 60)) > 1:

@@ -27,6 +27,8 @@ import datetime
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0'
 STREAM_PROFILE = 'p4'
 GUIDE_ARCHIVE_DAYS = 7
+# Magio's 429 on stream-url clears within seconds although it asks for a minute.
+PLAYBACK_RATE_LIMIT_RETRY_SECONDS = 4
 
 
 class MagioGoException(Exception):
@@ -182,7 +184,7 @@ class MagioGo(IPTVClient):
                     self._api_condition.wait(delay)
                 now = time.monotonic()
                 self._api_next_request = now + 1
-                self._api_background_after = now + self._api_guide_interval
+                self._api_background_after = max(self._api_background_after, now + self._api_guide_interval)
             self.diagnostics.record('api_requests')
             yield
         finally:
@@ -196,7 +198,7 @@ class MagioGo(IPTVClient):
         with self._api_condition:
             self._api_condition.notify_all()
 
-    def _apply_api_cooldown(self, response, attempt=0):
+    def _apply_api_cooldown(self, response, attempt=0, background=False, playback=False):
         if response.status_code >= 400:
             self.diagnostics.record('api_errors', status=response.status_code)
         if response.status_code not in (429, 500, 502, 503, 504):
@@ -204,22 +206,26 @@ class MagioGo(IPTVClient):
         delay = Retry().get_retry_after(response)
         delay = delay if delay is not None else min(2 ** (attempt + 1), 5)
         with self._api_condition:
-            self._api_next_request = max(self._api_next_request, time.monotonic() + delay)
+            shared_delay = delay
+            if response.status_code == 429 and (background or playback):
+                # The guide still waits the full Retry-After; playback only briefly.
+                shared_delay = min(delay, PLAYBACK_RATE_LIMIT_RETRY_SECONDS)
+            self._api_next_request = max(self._api_next_request, time.monotonic() + shared_delay)
             if response.status_code == 429:
                 self.diagnostics.record('api_rate_limits', status=429)
                 self._api_guide_interval = min(self._api_guide_interval * 2, 60)
-                self._api_background_after = max(self._api_background_after, self._api_next_request)
+                self._api_background_after = max(self._api_background_after, time.monotonic() + delay)
             self._api_condition.notify_all()
         logging.getLogger(__name__).warning('Magio API returned %s for %s; next request in %.1fs', response.status_code, response.request.path_url.split('?')[0] if response.request is not None else '?', delay)
         return True
 
-    def _get(self, url, params=None, background=False, max_wait=None, **kwargs):
+    def _get(self, url, params=None, background=False, max_wait=None, playback=False, **kwargs):
         kwargs.setdefault('timeout', (5, 15))
         try:
             with self._request() as session:
                 for attempt in range(3):
                     with self._api_slot(background, max_wait), session.get(url, params=params, **kwargs) as response:
-                        retry = self._apply_api_cooldown(response, attempt)
+                        retry = self._apply_api_cooldown(response, attempt, background, playback)
                         if retry and max_wait is not None and self._api_next_request - time.monotonic() > max_wait:
                             raise ApiCooldownError(self._api_next_request - time.monotonic())
                         if retry and attempt < 2:
@@ -361,7 +367,7 @@ class MagioGo(IPTVClient):
     def _stream_info(self, service, stream_id):
         self._login(max_wait=5)
         resp = self._get('https://skgo.magio.tv/v2/television/stream-url',
-                         max_wait=5,
+                         max_wait=5, playback=True,
                          params={'service': service,
                                  'name': self._device,
                                  'devtype': self._deviceType,
