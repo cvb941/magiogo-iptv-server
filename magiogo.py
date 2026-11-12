@@ -210,7 +210,7 @@ class MagioGo(IPTVClient):
                 self._api_guide_interval = min(self._api_guide_interval * 2, 60)
                 self._api_background_after = max(self._api_background_after, self._api_next_request)
             self._api_condition.notify_all()
-        logging.getLogger(__name__).warning('Magio API returned %s; next request in %.1fs', response.status_code, delay)
+        logging.getLogger(__name__).warning('Magio API returned %s for %s; next request in %.1fs', response.status_code, response.request.path_url.split('?')[0] if response.request is not None else '?', delay)
         return True
 
     def _get(self, url, params=None, background=False, max_wait=None, **kwargs):
