@@ -231,6 +231,16 @@ class XtreamTests(unittest.TestCase):
         self.assertEqual(response.headers['Retry-After'], '60')
         self.assertNotIn('cloud-', response.get_data(as_text=True))
 
+    def test_catchup_of_programme_on_air_plays_live(self):
+        now = time.time()
+        start = dt.datetime.fromtimestamp(now - 600, dt.UTC).replace(second=0, microsecond=0)
+        row = {'start': start.timestamp(), 'end': start.timestamp() + 3600, 'schedule_id': '9', 'title': 'Now',
+               'description': '', 'id': '9'}
+        with patch.object(self.service, 'programmes', return_value=[row]),                 patch.object(self.service, 'channel', return_value={'id': '4099', 'archive_days': 7}),                 patch('xtream.proxy_manifest', return_value=Response('<MPD/>', mimetype='application/dash+xml')) as manifest:
+            response = self.client.get(f"/timeshift/iptv/local-secret/60/{start.strftime('%Y-%m-%d:%H-%M')}/4099.ts")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(manifest.call_args.args[2], '4099')
+
     def test_live_alias_playlist_and_unsupported_output(self):
         with patch('xtream.proxy_manifest', return_value=Response('<MPD/>', mimetype='application/dash+xml')) as manifest:
             self.assertEqual(self.client.get('/iptv/local-secret/4099').status_code, 200)

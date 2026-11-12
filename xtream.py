@@ -247,6 +247,9 @@ def init_xtream(app, magio, storage_dir, context):
         if not channel['archive_days']:
             return {'error': 'archive_unavailable'}, 404
         programme = next((p for p in service.programmes(channel) if int(p['start'] // 60) == int(start // 60)), None)
+        # Stremio and AIOStreams ask for the programme on air as catch-up; there is none yet, so play live.
+        if programme is not None and programme['start'] <= time.time() < programme['end']:
+            return proxy_manifest(lambda: magio.channel_stream_info(str(channel['id'])), public_url(), str(channel['id']))
         if programme is None or not has_archive(channel, programme):
             return {'error': 'archive_unavailable'}, 404
         if abs(minutes - math.ceil((programme['end'] - programme['start']) / 60)) > 1:
