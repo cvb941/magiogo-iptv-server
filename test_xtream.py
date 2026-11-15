@@ -14,7 +14,7 @@ from flask import Flask, Response
 from werkzeug.exceptions import BadGateway
 
 from client import Channel, Programme
-from magiogo import ApiCooldownError, MagioGo
+from magiogo import ApiCooldownError, MagioGo, MagioGoException
 from xtream import Xtream, init_xtream
 
 
@@ -83,9 +83,45 @@ class XtreamTests(unittest.TestCase):
         self.assertEqual(Xtream(self.magio, self.directory.name, self.context).channels(), self.service.channels())
         self.assertEqual(Xtream(self.magio, self.directory.name, ['different-account']).data['channels'], [])
         self.assertEqual(self.api('get_live_streams', category_id='999').json, [])
+        self.assertEqual(self.api('get_live_categories').json, [{'category_id': '0', 'category_name': 'Magio GO', 'parent_id': 0}])
         self.assertEqual(self.api('get_vod_streams').json, [])
         if os.name == 'posix':
             self.assertEqual(self.service.path.stat().st_mode & 0o777, 0o600)
+
+    def test_channels_carry_magio_categories(self):
+        channels = []
+        for id_, name, category_id, category in [('4099', 'Jednotka HD', '1', 'Všeobecné'),
+                                                 ('4559', 'Šport HD', '5', 'Športové'),
+                                                 ('4146', 'Dvojka HD', '1', 'Všeobecné')]:
+            channel = Channel()
+            channel.id, channel.name, channel.category_id, channel.category = id_, name, category_id, category
+            channels.append(channel)
+        self.magio.channels.return_value = channels
+        self.assertEqual(self.api('get_live_categories').json,
+                         [{'category_id': '1', 'category_name': 'Všeobecné', 'parent_id': 0},
+                          {'category_id': '5', 'category_name': 'Športové', 'parent_id': 0}])
+        streams = self.api('get_live_streams').json
+        self.assertEqual([(s['stream_id'], s['category_id']) for s in streams], [(4099, '1'), (4559, '5'), (4146, '1')])
+        self.assertEqual([s['stream_id'] for s in self.api('get_live_streams', category_id='1').json], [4099, 4146])
+        playlist = self.client.get('/get.php', query_string=self.query).get_data(as_text=True)
+        self.assertIn('group-title="Športové",Šport HD', playlist)
+
+    def test_old_channel_cache_without_categories_is_refreshed(self):
+        self.service.data['channels'] = [dict(id='4099', name='Jednotka HD', logo='', archive_days=7)]
+        self.service.data['updated'] = time.time()
+        self.assertEqual(self.service.channels()[0]['category_id'], '0')
+        self.magio.channels.assert_called_once_with(max_wait=5)
+
+    def test_channel_categories_from_magio(self):
+        magio = MagioGo(self.directory.name, 'cloud-account', 'cloud-secret')
+        magio._auth_headers = Mock(return_value={})
+        magio._get = Mock(return_value={'categories': [
+            {'id': 1, 'name': 'Všeobecné', 'channels': [{'channelId': 4099}, {'channelId': 4146}]},
+            {'id': 5, 'name': 'Športové', 'channels': [{'channelId': 4559}, {'channelId': 4099}]}]})
+        self.assertEqual(magio.channel_categories(),
+                         {'4099': ('1', 'Všeobecné'), '4146': ('1', 'Všeobecné'), '4559': ('5', 'Športové')})
+        magio._get.side_effect = MagioGoException('ERR', 'down')
+        self.assertEqual(magio.channel_categories(), {})
 
     def test_catchup_table_has_only_finished_available_airings_and_base64_utf8(self):
         past = self.programme()

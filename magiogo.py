@@ -342,6 +342,7 @@ class MagioGo(IPTVClient):
                          max_wait=max_wait,
                          params={'list': 'LIVE', 'queryScope': 'LIVE'},
                          headers=self._auth_headers())
+        categories = self.channel_categories(max_wait=max_wait)
         ret = []
         for i in resp['items']:
             i = i['channel']
@@ -351,11 +352,27 @@ class MagioGo(IPTVClient):
             c.logo = i['logoUrl']
             if i['hasArchive']:
                 c.archive_days = self.archive_days()
+            c.category_id, c.category = categories.get(c.id, ('', ''))
             ret.append(c)
 
         progress(100)
 
         return ret
+
+    def channel_categories(self, max_wait=None):
+        """{channel id: (category id, category name)} from the app's channel categories ("Všeobecné", "Športové"...);
+        a channel listed in several keeps the first. Best effort: no categories when Magio does not answer."""
+        try:
+            resp = self._get('https://skgo.magio.tv/home/categories', max_wait=max_wait, params={'language': 'sk'},
+                             headers=self._auth_headers())
+            out = {}
+            for category in resp.get('categories') or []:
+                for channel in category.get('channels') or []:
+                    out.setdefault(str(channel['channelId']), (str(category['id']), category['name']))
+            return out
+        except Exception as error:  # noqa: BLE001 - the channel list must not depend on it
+            print(f'Magio channel categories unavailable: {type(error).__name__}')
+            return {}
 
     def channel_stream_info(self, channel_id, programme_id=None):
         return self._stream_info('LIVE', channel_id)

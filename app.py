@@ -111,7 +111,8 @@ def generate_m3u8(channels):
     with open("public/magioPlaylist.m3u8.tmp", "w", encoding="utf-8") as text_file:
         text_file.write("#EXTM3U\n")
         for channel in tqdm(channels, total=len(channels), desc="Generating .m3u8 playlist", unit="ch", file=sys.stdout):
-            text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}" tvg-logo="{channel.logo}",{channel.name}\n')
+            group = f' group-title="{channel.category}"' if channel.category else ''
+            text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}" tvg-logo="{channel.logo}"{group},{channel.name}\n')
             text_file.write(f"{magio_iptv_server_public_url}/channel/{channel.id}\n")
     os.replace("public/magioPlaylist.m3u8.tmp", "public/magioPlaylist.m3u8")
 

@@ -22,6 +22,9 @@ from dash_proxy import proxy_manifest
 from magiogo import ApiCooldownError, MagioGoException
 
 
+UNCATEGORIZED = ('0', 'Magio GO')  # channels in no Magio category (or categories unavailable)
+
+
 class Xtream:
     def __init__(self, magio, storage_dir, context):
         self.magio = magio
@@ -62,15 +65,24 @@ class Xtream:
         if not self.enabled:
             return
         with self.lock:
-            self.data['channels'] = [dict(id=str(c.id), name=c.name, logo=c.logo, archive_days=c.archive_days) for c in channels]
+            self.data['channels'] = [dict(id=str(c.id), name=c.name, logo=c.logo, archive_days=c.archive_days,
+                                          category_id=c.category_id or UNCATEGORIZED[0],
+                                          category=c.category or UNCATEGORIZED[1]) for c in channels]
             self.data['updated'] = time.time()
             self.save()
 
     def channels(self):
         with self.channel_lock:
-            if not self.data['channels'] or time.time() - self.data.get('updated', 0) > 12 * 3600:
+            stale = time.time() - self.data.get('updated', 0) > 12 * 3600
+            # a cache from before channel categories is refreshed once
+            if not self.data['channels'] or stale or 'category_id' not in self.data['channels'][0]:
                 self.update_channels(self.magio.channels(max_wait=5))
             return list(self.data['channels'])
+
+    def categories(self):
+        """[(id, name)] of the channels' categories, in the order of the channel list (Magio's own genre order)."""
+        return list(dict.fromkeys((c.get('category_id') or UNCATEGORIZED[0], c.get('category') or UNCATEGORIZED[1])
+                                  for c in self.channels()))
 
     def channel(self, channel_id):
         channel = next((c for c in self.channels() if c['id'] == str(channel_id)), None)
@@ -189,17 +201,17 @@ def init_xtream(app, magio, storage_dir, context):
                                 'timestamp_now': int(now.timestamp()), 'time_now': now.strftime('%Y-%m-%d %H:%M:%S')},
             }
         if action == 'get_live_categories':
-            return [{'category_id': '1', 'category_name': 'Magio GO', 'parent_id': 0}]
+            return [{'category_id': i, 'category_name': name, 'parent_id': 0} for i, name in service.categories()]
         if action in ('get_vod_categories', 'get_vod_streams', 'get_series_categories', 'get_series'):
             return []
         if action == 'get_live_streams':
-            if request.values.get('category_id', '1') not in ('', '1'):
-                return []
+            category = request.values.get('category_id', '')
             return [dict(num=i, name=c['name'], stream_type='live', stream_id=int(c['id']), stream_icon=c['logo'],
-                         epg_channel_id=c['id'], added='0', category_id='1', container_extension='mpd',
+                         epg_channel_id=c['id'], added='0', category_id=c['category_id'],
+                         container_extension='mpd',
                          custom_sid='', tv_archive=int(c['archive_days'] > 0), direct_source='',
                          tv_archive_duration=c['archive_days'], is_adult='0')
-                    for i, c in enumerate(service.channels(), 1)]
+                    for i, c in enumerate(service.channels(), 1) if category in ('', c['category_id'])]
         if action in ('get_short_epg', 'get_simple_data_table', 'get_simple_date_table'):
             if action == 'get_short_epg':
                 try:
@@ -293,7 +305,8 @@ def init_xtream(app, magio, storage_dir, context):
         for c in service.channels():
             name = c['name'].replace('\r', '').replace('\n', '')
             logo = c['logo'].replace('"', '%22').replace('\r', '').replace('\n', '')
-            lines.extend([f'#EXTINF:-1 tvg-id="{c["id"]}" tvg-logo="{logo}" group-title="Magio GO",{name}',
+            group = c['category'].replace('"', "'").replace('\r', '').replace('\n', '')
+            lines.extend([f'#EXTINF:-1 tvg-id="{c["id"]}" tvg-logo="{logo}" group-title="{group}",{name}',
                           f'{public_url()}/live/{username}/{password}/{c["id"]}.mpd'])
         return Response('\n'.join(lines) + '\n', mimetype='application/x-mpegURL')
 

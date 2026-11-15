@@ -28,6 +28,9 @@ class Channel(Base):
         self.is_pin_protected = False
         # if not 0 channel supports archive/catchup/replay
         self.archive_days = 0
+        # provider category (genre) of the channel: id and name, e.g. '1', 'Všeobecné'
+        self.category_id = ''
+        self.category = ''
         # channel metadata
         self.metadata = {}  # type: Dict[str, int]
 
