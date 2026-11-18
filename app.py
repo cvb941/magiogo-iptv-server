@@ -118,7 +118,7 @@ def generate_m3u8(channels):
 
 
 def generate_xmltv(channels):
-    date_from = datetime.datetime.now() - datetime.timedelta(days=0)
+    date_from = datetime.datetime.now() - datetime.timedelta(days=int(os.environ.get('MAGIO_GUIDE_PAST_DAYS', 0)))
     date_to = datetime.datetime.now() + datetime.timedelta(days=int(os.environ.get('MAGIO_GUIDE_DAYS', 7)))
     channel_ids = list(map(lambda c: c.id, channels))
     with tqdm(total=100, desc="Generating XMLTV guide", unit="pct", file=sys.stdout) as bar:
