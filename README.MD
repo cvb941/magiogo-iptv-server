@@ -62,12 +62,17 @@ It should be a publicly (or privately) reachable URL from IPTV clients, to this 
 **MAGIO_GUIDE_DAYS** signifies how many days from today should be loaded
 into the XMLTV guide on refresh.
 
+**MAGIO_GUIDE_PAST_DAYS** signifies how many days before today should be included
+in the XMLTV guide on refresh (useful for catch-up thumbnails). The default is 0.
+
 **MAGIO_GUIDE_REFRESH_HOURS** is the number of hours between the guide and channel playlist updates.
 
 **MAGIO_DEVICE_TYPE** sets the device type sent to Magio APIs. The default is OTT_STB.
 You can also use **OTT_ANDROID** for a mobile profile.
 
 **MAGIO_DEVICE_NAME** sets the device name sent to Magio APIs. The default is Magio IPTV Server.
+
+**MAGIO_APP_VERSION** overrides the app version sent to Magio APIs (defaults to `5.0.0` for `OTT_ANDROID`, `0.0.0` otherwise).
 
 ### Python
 ```shell script

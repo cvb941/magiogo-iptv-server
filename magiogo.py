@@ -68,12 +68,12 @@ class MagioGoRecording:
 
 class MagioGo(IPTVClient):
 
-    def __init__(self, storage_dir, user_name, password, device_type='OTT_STB', device_name='Magio IPTV Server'):
+    def __init__(self, storage_dir, user_name, password, device_type='OTT_STB', device_name='Magio IPTV Server', app_version=None):
         self._user_name = user_name
         self._password = password
         self._device = device_name
         self._deviceType = device_type
-        self._appVersion = '4.1.1' if self._deviceType == 'OTT_ANDROID' else '0.0.0'
+        self._appVersion = app_version or os.environ.get('MAGIO_APP_VERSION') or ('5.0.0' if self._deviceType == 'OTT_ANDROID' else '0.0.0')
         self._data = MagioGoSessionData()
         self.diagnostics = Diagnostics()
         self._auth_lock = threading.Lock()
