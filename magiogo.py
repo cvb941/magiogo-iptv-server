@@ -73,7 +73,7 @@ class MagioGo(IPTVClient):
         self._password = password
         self._device = device_name
         self._deviceType = device_type
-        self._appVersion = app_version or os.environ.get('MAGIO_APP_VERSION') or ('5.0.0' if self._deviceType == 'OTT_ANDROID' else '0.0.0')
+        self._appVersion = app_version or ('5.0.0' if self._deviceType == 'OTT_ANDROID' else '0.0.0')
         self._data = MagioGoSessionData()
         self.diagnostics = Diagnostics()
         self._auth_lock = threading.Lock()

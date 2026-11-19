@@ -51,10 +51,15 @@ class StartupTests(unittest.TestCase):
                     try:
                         with patch.dict(os.environ, {'MAGIO_USERNAME': 'test', 'MAGIO_PASSWORD': 'test', 'MAGIO_GUIDE_REFRESH_HOURS': '12', 'MAGIO_QUALITY': 'REMOVED', 'MAGIO_DEVICE_TYPE': 'OTT_STB', 'MAGIO_DEVICE_NAME': 'Magio IPTV Server'}), patch('magiogo.MagioGo', return_value=client) as create_client, patch('atexit.register'):
                             module = importlib.import_module('app')
-                        create_client.assert_called_once_with('./storage', 'test', 'test', device_type='OTT_STB', device_name='Magio IPTV Server')
+                        create_client.assert_called_once_with('./storage', 'test', 'test', device_type='OTT_STB', device_name='Magio IPTV Server',
+                                                              app_version=None)
                         expected_context = hashlib.sha256(json.dumps(['test', 'OTT_STB', 'Magio IPTV Server', 'p4']).encode()).hexdigest()
                         self.assertEqual(module.xtream.context, expected_context)
                         self.assertEqual(module.app.extensions['dash_session_cache']['context'], expected_context)
+                        now = datetime(2026, 1, 10, 12)
+                        for past_days, expected in (('0', 0), ('3', 3), ('30', 7), ('-2', 0)):
+                            with patch.dict(os.environ, {'MAGIO_GUIDE_PAST_DAYS': past_days, 'MAGIO_GUIDE_DAYS': '2'}):
+                                self.assertEqual(module.guide_range(now), (now - timedelta(days=expected), now + timedelta(days=2)))
                         if state == 'fresh':
                             client.channels.assert_not_called()
                             self.assertIsNotNone(module.last_refresh)
@@ -125,6 +130,14 @@ class StartupTests(unittest.TestCase):
                 if previous_app is not None:
                     sys.modules['app'] = previous_app
                 os.chdir(previous_directory)
+
+
+class AppVersionTests(unittest.TestCase):
+    def test_app_version_defaults_by_device_type_and_can_be_overridden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(MagioGo(directory, 'test', 'test')._appVersion, '0.0.0')
+            self.assertEqual(MagioGo(directory, 'test', 'test', device_type='OTT_ANDROID')._appVersion, '5.0.0')
+            self.assertEqual(MagioGo(directory, 'test', 'test', device_type='OTT_ANDROID', app_version='5.1.0')._appVersion, '5.1.0')
 
 
 class MagioRequestTests(unittest.TestCase):
