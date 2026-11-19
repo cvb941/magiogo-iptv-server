@@ -220,7 +220,15 @@ def _trim_live_timelines(root, namespace, max_seconds=45):
             tracks.append((timeline, timescale, segs))
     if not tracks:
         return
-    if max(sum(d for _, d in segs) / ts for _, ts, segs in tracks) < 55:
+    max_duration = max(sum(d for _, d in segs) / ts for _, ts, segs in tracks)
+    if max_duration > 75:
+        root.set('type', 'static')
+        for attr in ('minimumUpdatePeriod', 'timeShiftBufferDepth', 'publishTime', 'suggestedPresentationDelay'):
+            root.attrib.pop(attr, None)
+        if not root.get('mediaPresentationDuration'):
+            root.set('mediaPresentationDuration', f'PT{max_duration:.3f}S')
+        return
+    if max_duration < 55:
         return
     min_len = min(len(segs) for _, _, segs in tracks)
     keep = 2
