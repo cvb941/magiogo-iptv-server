@@ -716,3 +716,63 @@ class DashProxyTests(unittest.TestCase):
         self.assertEqual(snapshot['counters']['cdn_requests'], 3)
         self.assertEqual(snapshot['counters']['cdn_errors'], 2)
         self.assertEqual(snapshot['last']['cdn_errors']['error_type'], 'ChunkedEncodingError')
+
+
+class HlsChasePlayTests(unittest.TestCase):
+    def test_hls_event_chase_play_and_tfdt_rebase(self):
+        import struct
+        import dash_proxy
+        mpd = b"""<?xml version="1.0" encoding="utf-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic">
+  <BaseURL>https://cdn.example.com/live/</BaseURL>
+  <Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <Representation id="v1" bandwidth="3400000" codecs="hvc1.1.6.L120.b0" width="1280" height="720">
+        <SegmentTemplate timescale="10000000" initialization="init_v.mp4" media="seg_v_$Time$.m4s">
+          <SegmentTimeline>
+            <S t="17951271000000000" d="100000000" r="2"/>
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet contentType="audio" mimeType="audio/mp4" lang="slk">
+      <Representation id="a1" bandwidth="128000" codecs="mp4a.40.2">
+        <SegmentTemplate timescale="48000" initialization="init_a.mp4" media="seg_a_$Time$.m4s">
+          <SegmentTimeline>
+            <S t="86166100800000" d="480000" r="2"/>
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"""
+        origins = []
+        tracks, is_dynamic = dash_proxy._parse_hls_tracks(mpd, 'https://cdn.example.com/index.mpd', 'http://local:5050/segproxy/sid1/', origins)
+        self.assertTrue(is_dynamic)
+        self.assertEqual(len(tracks['video']), 1)
+        self.assertEqual(len(tracks['audio']), 1)
+        self.assertEqual(len(tracks['video'][0]['segments']), 3)
+        self.assertIn('_hls_t0=', tracks['video'][0]['segments'][0][1])
+
+        master = dash_proxy._render_hls_master(tracks, 'http://local:5050', 'sid1').decode()
+        self.assertIn('#EXT-X-VERSION:7', master)
+        self.assertIn('LANGUAGE="slk",DEFAULT=YES', master)
+        self.assertIn('CODECS="hvc1.1.6.L120.b0,mp4a.40.2"', master)
+
+        media_live = dash_proxy._render_hls_media(tracks['video'][0], True, True).decode()
+        self.assertIn('#EXT-X-PLAYLIST-TYPE:EVENT', media_live)
+        self.assertIn('#EXT-X-START:TIME-OFFSET=0.0', media_live)
+        self.assertNotIn('#EXT-X-ENDLIST', media_live)
+
+        media_ended = dash_proxy._render_hls_media(tracks['video'][0], False, True).decode()
+        self.assertIn('#EXT-X-PLAYLIST-TYPE:EVENT', media_ended)
+        self.assertIn('#EXT-X-ENDLIST', media_ended)
+
+        # Verify _rebase_moof_tfdt rewrites 64-bit tfdt v1 accurately
+        tfdt_payload = struct.pack('>B3sQ', 1, b'\x00\x00\x00', 17951271000000000 + 80000000)
+        tfdt_box = struct.pack('>I4s', 8 + len(tfdt_payload), b'tfdt') + tfdt_payload
+        traf_box = struct.pack('>I4s', 8 + len(tfdt_box), b'traf') + tfdt_box
+        moof_box = struct.pack('>I4s', 8 + len(traf_box), b'moof') + traf_box
+        rebased = dash_proxy._rebase_moof_tfdt(moof_box, 1795127100.0, 10000000)
+        new_bmdt = struct.unpack('>Q', rebased[28:36])[0]
+        self.assertEqual(new_bmdt, 80000000)
