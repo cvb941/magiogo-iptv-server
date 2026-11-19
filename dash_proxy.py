@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import struct
 import tempfile
 import threading
 import time
@@ -25,6 +26,37 @@ SEGMENT_SESSION_TTL_SECONDS = 30 * 60
 STALE_SESSION_RETENTION_SECONDS = 24 * 60 * 60
 CHANNEL_SESSIONS = {}
 CHANNEL_LOCKS = {}
+HLS_CACHE = {}
+HLS_AUDIO_NAMES = {
+    'slo': 'Slovak',
+    'slk': 'Slovak',
+    'ces': 'Czech',
+    'cze': 'Czech',
+    'eng': 'English',
+    'mul': 'Original',
+    'qaa': 'Original',
+    'mis': 'Original',
+    'ads': 'Audio Description',
+}
+
+
+def apply_cors_headers(response):
+    origin = request.headers.get('Origin') if has_app_context() else None
+    if origin:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers.add('Vary', 'Origin')
+    else:
+        response.headers.setdefault('Access-Control-Allow-Origin', '*')
+    response.headers['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Range, Content-Type, Accept, Origin'
+    response.headers['Access-Control-Expose-Headers'] = 'Content-Length, Content-Range'
+    return response
+
+
+@dash_proxy.after_request
+def _dash_proxy_cors(response):
+    return apply_cors_headers(response)
 CDN_ADAPTER = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16)
 atexit.register(CDN_ADAPTER.close)
 
@@ -421,6 +453,7 @@ def _fetch_manifest(stream_info, public_url, key, prefer_best=False):
                             if value['expires'] + STALE_SESSION_RETENTION_SECONDS <= now
                             or (value['expires'] <= now and key not in CHANNEL_SESSIONS.values())]:
             del SEGMENT_SESSIONS[expired_sid]
+            HLS_CACHE.pop(expired_sid, None)
         for channel in [key for key, value in CHANNEL_SESSIONS.items() if value not in SEGMENT_SESSIONS]:
             del CHANNEL_SESSIONS[channel]
         SEGMENT_SESSIONS[sid] = {
@@ -437,9 +470,75 @@ def _fetch_manifest(stream_info, public_url, key, prefer_best=False):
     return Response(manifest, mimetype='application/dash+xml')
 
 
-@dash_proxy.route('/segproxy/<sid>/<int:origin_id>/', defaults={'subpath': ''})
-@dash_proxy.route('/segproxy/<sid>/<int:origin_id>/<path:subpath>')
+
+def _extract_mdhd_timescale(buf):
+    """Extract mdhd timescale from an fMP4 init segment."""
+    stack = [(0, len(buf))]
+    while stack:
+        pos, end = stack.pop()
+        while pos + 8 <= end:
+            size, btype = struct.unpack('>I4s', buf[pos:pos + 8])
+            if size < 8 or pos + size > end:
+                break
+            if btype in (b'moov', b'trak', b'mdia'):
+                stack.append((pos + 8, pos + size))
+            elif btype == b'mdhd':
+                ver = buf[pos + 8]
+                if ver == 0 and pos + 24 <= end:
+                    return struct.unpack('>I', buf[pos + 20:pos + 24])[0]
+                if ver == 1 and pos + 32 <= end:
+                    return struct.unpack('>I', buf[pos + 28:pos + 32])[0]
+            pos += size
+    return None
+
+
+def _rebase_moof_tfdt(buf, t0_seconds, timescale):
+    """Subtract t0_seconds * timescale from every tfdt box in leading moof box(es)."""
+    if not timescale or t0_seconds <= 0:
+        return buf
+    offset_ticks = int(round(t0_seconds * timescale))
+    out = bytearray(buf)
+    pos = 0
+    end = len(out)
+    while pos + 8 <= end:
+        size, btype = struct.unpack('>I4s', out[pos:pos + 8])
+        if size < 8 or pos + size > end:
+            break
+        if btype == b'moof':
+            tpos = pos + 8
+            mend = pos + size
+            while tpos + 8 <= mend:
+                tsize, ttype = struct.unpack('>I4s', out[tpos:tpos + 8])
+                if tsize < 8 or tpos + tsize > mend:
+                    break
+                if ttype == b'traf':
+                    ipos = tpos + 8
+                    tend = tpos + tsize
+                    while ipos + 8 <= tend:
+                        isize, itype = struct.unpack('>I4s', out[ipos:ipos + 8])
+                        if isize < 8 or ipos + isize > tend:
+                            break
+                        if itype == b'tfdt' and ipos + 16 <= tend:
+                            ver = out[ipos + 8]
+                            if ver == 1 and ipos + 20 <= tend:
+                                bmdt = struct.unpack('>Q', out[ipos + 12:ipos + 20])[0]
+                                new_bmdt = max(0, bmdt - offset_ticks)
+                                struct.pack_into('>Q', out, ipos + 12, new_bmdt)
+                            elif ver == 0:
+                                bmdt = struct.unpack('>I', out[ipos + 12:ipos + 16])[0]
+                                new_bmdt = max(0, bmdt - offset_ticks)
+                                struct.pack_into('>I', out, ipos + 12, new_bmdt)
+                        ipos += isize
+                tpos += tsize
+        pos += size
+    return bytes(out)
+
+
+@dash_proxy.route('/segproxy/<sid>/<int:origin_id>/', defaults={'subpath': ''}, methods=['GET', 'HEAD', 'OPTIONS'])
+@dash_proxy.route('/segproxy/<sid>/<int:origin_id>/<path:subpath>', methods=['GET', 'HEAD', 'OPTIONS'])
 def segment_proxy(sid, origin_id, subpath):
+    if request.method == 'OPTIONS':
+        return Response(status=204)
     now = time.monotonic()
     with SEGMENT_SESSIONS_LOCK:
         session_info = SEGMENT_SESSIONS.get(sid)
@@ -457,8 +556,15 @@ def segment_proxy(sid, origin_id, subpath):
         # DASH demuxers can request an unlisted future fragment and then replay it on reload.
         time.sleep(.5)
         return Response(status=404, headers={'Retry-After': '1'})
+    hls_kind = request.args.get('_hls_kind')
+    hls_init = request.args.get('_hls_init') == '1'
+    hls_t0 = request.args.get('_hls_t0')
     if request.query_string:
-        target_url += '?' + request.query_string.decode('ascii')
+        from urllib.parse import parse_qsl, urlencode
+        fwd_params = [(k, v) for k, v in parse_qsl(request.query_string.decode('ascii'), keep_blank_values=True)
+                      if not k.startswith('_hls_')]
+        if fwd_params:
+            target_url += '?' + urlencode(fwd_params)
     headers = {'User-Agent': session_info['user_agent'], 'Accept-Encoding': 'identity'}
     headers.update((name, request.headers[name]) for name in ('Range', 'If-Range') if name in request.headers)
     try:
@@ -474,6 +580,29 @@ def segment_proxy(sid, origin_id, subpath):
 
     def chunks():
         try:
+            if hls_init and hls_kind and upstream.status_code == 200:
+                data = upstream.content
+                ts = _extract_mdhd_timescale(data)
+                if ts:
+                    with SEGMENT_SESSIONS_LOCK:
+                        entry = HLS_CACHE.get(sid)
+                        if entry is not None:
+                            entry.setdefault('timescales', {})[hls_kind] = ts
+                yield data
+                return
+            if hls_t0 and hls_kind and upstream.status_code == 200:
+                t0_sec = float(hls_t0)
+                with SEGMENT_SESSIONS_LOCK:
+                    entry = HLS_CACHE.get(sid) or {}
+                    ts = entry.get('timescales', {}).get(hls_kind)
+                if ts is None:
+                    ts = 48000 if hls_kind == 'audio' else 10000000
+                it = upstream.iter_content(chunk_size=65536)
+                first = next(it, b'')
+                if first:
+                    yield _rebase_moof_tfdt(first, t0_sec, ts)
+                yield from it
+                return
             yield from upstream.iter_content(chunk_size=65536)
         except requests.RequestException as error:
             _record('cdn_errors', error_type=type(error).__name__)
@@ -489,3 +618,316 @@ def segment_proxy(sid, origin_id, subpath):
         response.headers['Content-Length'] = upstream.headers['Content-Length']
     response.call_on_close(upstream.close)
     return response
+
+
+def _parse_hls_tracks(content, manifest_url, proxy_base, origins):
+    """Translate a raw DASH MPD into HLS v7 fMP4 video/audio track descriptors."""
+    root = ET.fromstring(content)
+    namespace = root.tag[:root.tag.index('}') + 1] if root.tag.startswith('{') else ''
+    is_dynamic = root.get('type') == 'dynamic'
+
+    def proxy_url(url):
+        resolved = urljoin(manifest_url, url)
+        parts = urlsplit(resolved)
+        origin = urlunsplit((parts.scheme, parts.netloc, '', '', ''))
+        if origin not in origins:
+            origins.append(origin)
+        origin_id = origins.index(origin)
+        path = parts.path.lstrip('/')
+        query = f'?{parts.query}' if parts.query else ''
+        return f'{proxy_base}{origin_id}/{path}{query}'
+
+    mpd_base = manifest_url
+    base_el = root.find(namespace + 'BaseURL')
+    if base_el is not None and base_el.text:
+        mpd_base = urljoin(manifest_url, base_el.text.strip())
+
+    videos = []
+    audios = []
+    for aset in root.findall('.//' + namespace + 'AdaptationSet'):
+        ctype = (aset.get('contentType') or '').lower()
+        mime = (aset.get('mimeType') or '').lower()
+        if 'video' in ctype or 'video' in mime:
+            kind = 'video'
+        elif 'audio' in ctype or 'audio' in mime:
+            kind = 'audio'
+        else:
+            continue
+
+        aset_base = mpd_base
+        aset_base_el = aset.find(namespace + 'BaseURL')
+        if aset_base_el is not None and aset_base_el.text:
+            aset_base = urljoin(mpd_base, aset_base_el.text.strip())
+
+        reps = aset.findall(namespace + 'Representation')
+        if not reps:
+            continue
+        rep = max(reps, key=lambda r: int(r.get('bandwidth') or 0))
+        rep_base = aset_base
+        rep_base_el = rep.find(namespace + 'BaseURL')
+        if rep_base_el is not None and rep_base_el.text:
+            rep_base = urljoin(aset_base, rep_base_el.text.strip())
+
+        st = rep.find(namespace + 'SegmentTemplate')
+        if st is None:
+            st = aset.find(namespace + 'SegmentTemplate')
+        if st is None:
+            continue
+        tl = st.find(namespace + 'SegmentTimeline')
+        if tl is None:
+            continue
+
+        timescale = int(st.get('timescale') or 1)
+        bw = rep.get('bandwidth') or '0'
+        rid = rep.get('id') or ''
+        init_tpl = (st.get('initialization') or '').replace('$RepresentationID$', rid).replace('$Bandwidth$', bw)
+        media_tpl = (st.get('media') or '').replace('$RepresentationID$', rid).replace('$Bandwidth$', bw)
+        if not init_tpl or not media_tpl:
+            continue
+
+        def add_param(u, params):
+            return u + ('&' if '?' in u else '?') + params
+
+        init_url = add_param(proxy_url(urljoin(rep_base, init_tpl)), f'_hls_kind={kind}&_hls_init=1')
+        segments = []
+        t = 0
+        t0_sec = None
+        for s in tl.findall(namespace + 'S'):
+            if s.get('t') is not None:
+                t = int(s.get('t'))
+            if t0_sec is None:
+                t0_sec = t / timescale
+            d = int(s.get('d'))
+            repeat = int(s.get('r') or 0)
+            if repeat < 0:
+                repeat = 0
+            for _ in range(repeat + 1):
+                seg_rel = media_tpl.replace('$Time$', str(t))
+                seg_u = proxy_url(urljoin(rep_base, seg_rel))
+                if t0_sec and t0_sec > 86400:
+                    seg_u = add_param(seg_u, f'_hls_kind={kind}&_hls_t0={t0_sec:.6f}')
+                segments.append((d / timescale, seg_u))
+                t += d
+
+        if not segments:
+            continue
+
+        codecs = rep.get('codecs') or aset.get('codecs') or ''
+        lang = (aset.get('lang') or '').lower()
+        track = {
+            'init': init_url,
+            'segments': segments,
+            'bandwidth': int(bw) if bw.isdigit() else 0,
+            'codecs': codecs,
+            'width': rep.get('width'),
+            'height': rep.get('height'),
+            'lang': lang,
+            'name': HLS_AUDIO_NAMES.get(lang, lang.upper() if lang else 'Audio'),
+        }
+        if kind == 'video':
+            videos.append(track)
+        else:
+            audios.append(track)
+
+    if not videos:
+        raise ValueError('No video tracks in DASH manifest')
+    videos.sort(key=lambda v: v['bandwidth'], reverse=True)
+    return {'video': [videos[0]], 'audio': audios}, is_dynamic
+
+
+def _render_hls_master(tracks, public_url, sid):
+    base = public_url.rstrip('/')
+    lines = ['#EXTM3U', '#EXT-X-VERSION:7', '#EXT-X-INDEPENDENT-SEGMENTS']
+    audios = tracks['audio']
+    default_idx = next((i for i, a in enumerate(audios) if a['lang'] in ('slo', 'slk')), 0)
+    audio_codecs = audios[default_idx]['codecs'] if audios else ''
+    for i, a in enumerate(audios):
+        is_def = 'YES' if i == default_idx else 'NO'
+        lang_attr = f',LANGUAGE="{a["lang"]}"' if a['lang'] else ''
+        lines.append(
+            f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="{a["name"]}"{lang_attr},'
+            f'DEFAULT={is_def},AUTOSELECT=YES,URI="{base}/hls/{sid}/audio/{i}.m3u8"'
+        )
+    v = tracks['video'][0]
+    codecs = ','.join(c for c in (v['codecs'], audio_codecs) if c)
+    attrs = [f'BANDWIDTH={v["bandwidth"] or 3400000}']
+    if v.get('width') and v.get('height'):
+        attrs.append(f'RESOLUTION={v["width"]}x{v["height"]}')
+    if codecs:
+        attrs.append(f'CODECS="{codecs}"')
+    if audios:
+        attrs.append('AUDIO="audio"')
+    lines.append(f'#EXT-X-STREAM-INF:{",".join(attrs)}')
+    lines.append(f'{base}/hls/{sid}/video/0.m3u8')
+    return ('\n'.join(lines) + '\n').encode('utf-8')
+
+
+def _render_hls_media(track, is_dynamic, started_dynamic):
+    max_dur = max((d for d, _ in track['segments']), default=10.0)
+    target_dur = max(1, math.ceil(max_dur))
+    playlist_type = 'EVENT' if started_dynamic else 'VOD'
+    lines = [
+        '#EXTM3U',
+        '#EXT-X-VERSION:7',
+        f'#EXT-X-TARGETDURATION:{target_dur}',
+        '#EXT-X-MEDIA-SEQUENCE:0',
+        f'#EXT-X-PLAYLIST-TYPE:{playlist_type}',
+    ]
+    if started_dynamic:
+        lines.append('#EXT-X-START:TIME-OFFSET=0.0')
+    lines.append(f'#EXT-X-MAP:URI="{track["init"]}"')
+    for dur, url in track['segments']:
+        lines.append(f'#EXTINF:{dur:.6f},')
+        lines.append(url)
+    if not is_dynamic:
+        lines.append('#EXT-X-ENDLIST')
+    return ('\n'.join(lines) + '\n').encode('utf-8')
+
+
+def proxy_hls_master(stream_info, public_url, channel_id=None):
+    key = (f'hls:{channel_id}', public_url) if channel_id is not None else None
+    with SEGMENT_SESSIONS_LOCK:
+        lock = CHANNEL_LOCKS.setdefault(key, threading.Lock()) if key is not None else threading.Lock()
+    with lock:
+        now = time.monotonic()
+        with SEGMENT_SESSIONS_LOCK:
+            sid = CHANNEL_SESSIONS.get(key) if key is not None else None
+            cached = SEGMENT_SESSIONS.get(sid) if sid else None
+            if cached and cached['expires'] <= now:
+                cached = None
+                sid = None
+            hls_entry = HLS_CACHE.get(sid) if sid else None
+            if cached and hls_entry and now - hls_entry['time'] < 3.0:
+                cached['expires'] = now + SEGMENT_SESSION_TTL_SECONDS
+                body = _render_hls_master(hls_entry['tracks'], public_url, sid)
+                resp = Response(body, mimetype='application/vnd.apple.mpegurl', headers={'Cache-Control': 'no-cache'})
+                return apply_cors_headers(resp)
+
+        if cached:
+            url, user_agent = cached['manifest_url'], cached['user_agent']
+            origins = list(cached['origins'])
+        else:
+            info = stream_info() if callable(stream_info) else stream_info
+            if info.manifest_type != 'mpd':
+                return redirect(info.url, code=303)
+            url, user_agent = info.url, info.user_agent
+            sid, origins = uuid.uuid4().hex, []
+
+        try:
+            with _CDNSession() as session:
+                if cached:
+                    session.cookies.update(cached['cookies'])
+                with session.get(url, headers={'User-Agent': user_agent}, timeout=10) as upstream:
+                    upstream.raise_for_status()
+                    tracks, is_dynamic = _parse_hls_tracks(
+                        upstream.content, upstream.url,
+                        f'{public_url.rstrip("/")}/segproxy/{sid}/', origins,
+                    )
+                    cookies = session.cookies.copy()
+                    manifest_url = upstream.url
+        except requests.RequestException as error:
+            current_app.logger.warning('HLS DASH fetch failed: %s', type(error).__name__)
+            abort(502)
+        except (ET.ParseError, ValueError) as error:
+            current_app.logger.warning('HLS DASH parse failed: %s', error)
+            abort(502)
+
+        now = time.monotonic()
+        started_dynamic = (HLS_CACHE.get(sid) or {}).get('started_dynamic', is_dynamic)
+        with SEGMENT_SESSIONS_LOCK:
+            SEGMENT_SESSIONS[sid] = {
+                'origins': origins, 'cookies': cookies, 'user_agent': user_agent,
+                'expires': now + SEGMENT_SESSION_TTL_SECONDS,
+                'manifest_url': manifest_url, 'manifest': b'', 'manifest_time': now,
+                'live_windows': {},
+            }
+            HLS_CACHE[sid] = {
+                'tracks': tracks,
+                'is_dynamic': is_dynamic,
+                'started_dynamic': started_dynamic,
+                'time': now,
+                'public_url': public_url,
+            }
+            if key is not None:
+                CHANNEL_SESSIONS[key] = sid
+        _persist_sessions(force=True)
+        body = _render_hls_master(tracks, public_url, sid)
+        resp = Response(body, mimetype='application/vnd.apple.mpegurl', headers={'Cache-Control': 'no-cache'})
+        return apply_cors_headers(resp)
+
+
+@dash_proxy.route('/hls/<sid>/<kind>/<int:track_idx>.m3u8', methods=['GET', 'HEAD', 'OPTIONS'])
+def hls_media_playlist(sid, kind, track_idx):
+    if request.method == 'OPTIONS':
+        return Response(status=204)
+    if kind not in ('video', 'audio'):
+        return Response(status=404)
+
+    now = time.monotonic()
+    with SEGMENT_SESSIONS_LOCK:
+        session_info = SEGMENT_SESSIONS.get(sid)
+        if session_info is None:
+            return Response(status=404)
+        if session_info['expires'] <= now:
+            return Response(status=410)
+        session_info['expires'] = now + SEGMENT_SESSION_TTL_SECONDS
+        hls_entry = HLS_CACHE.get(sid)
+        need_refresh = hls_entry is None or (hls_entry['is_dynamic'] and now - hls_entry['time'] >= 3.0)
+        lock = CHANNEL_LOCKS.setdefault(('hls_sid', sid), threading.Lock())
+
+    if need_refresh:
+        with lock:
+            now = time.monotonic()
+            with SEGMENT_SESSIONS_LOCK:
+                session_info = SEGMENT_SESSIONS.get(sid)
+                if session_info is None:
+                    return Response(status=404)
+                hls_entry = HLS_CACHE.get(sid)
+                still_need = hls_entry is None or (hls_entry['is_dynamic'] and now - hls_entry['time'] >= 3.0)
+                if still_need:
+                    url = session_info['manifest_url']
+                    user_agent = session_info['user_agent']
+                    cookies = session_info['cookies']
+                    origins = list(session_info['origins'])
+                    public_url = (hls_entry or {}).get('public_url') or request.url_root.rstrip('/')
+                    started_dynamic = (hls_entry or {}).get('started_dynamic')
+            if still_need:
+                try:
+                    with _CDNSession() as session:
+                        session.cookies.update(cookies)
+                        with session.get(url, headers={'User-Agent': user_agent}, timeout=10) as upstream:
+                            upstream.raise_for_status()
+                            tracks, is_dynamic = _parse_hls_tracks(
+                                upstream.content, upstream.url,
+                                f'{public_url.rstrip("/")}/segproxy/{sid}/', origins,
+                            )
+                            new_cookies = session.cookies.copy()
+                            new_url = upstream.url
+                except (requests.RequestException, ET.ParseError, ValueError) as error:
+                    current_app.logger.warning('HLS refresh failed for %s: %s', sid, type(error).__name__)
+                    if hls_entry is None:
+                        abort(502)
+                else:
+                    if started_dynamic is None:
+                        started_dynamic = is_dynamic
+                    with SEGMENT_SESSIONS_LOCK:
+                        if sid in SEGMENT_SESSIONS:
+                            SEGMENT_SESSIONS[sid]['origins'] = origins
+                            SEGMENT_SESSIONS[sid]['cookies'] = new_cookies
+                            SEGMENT_SESSIONS[sid]['manifest_url'] = new_url
+                            SEGMENT_SESSIONS[sid]['expires'] = time.monotonic() + SEGMENT_SESSION_TTL_SECONDS
+                        hls_entry = {
+                            'tracks': tracks,
+                            'is_dynamic': is_dynamic,
+                            'started_dynamic': started_dynamic,
+                            'time': time.monotonic(),
+                            'public_url': public_url,
+                            'timescales': (HLS_CACHE.get(sid) or {}).get('timescales', {}),
+                        }
+                        HLS_CACHE[sid] = hls_entry
+
+    tracks_list = hls_entry['tracks'].get(kind, [])
+    if track_idx < 0 or track_idx >= len(tracks_list):
+        return Response(status=404)
+    body = _render_hls_media(tracks_list[track_idx], hls_entry['is_dynamic'], hls_entry['started_dynamic'])
+    return Response(body, mimetype='application/vnd.apple.mpegurl', headers={'Cache-Control': 'no-cache'})

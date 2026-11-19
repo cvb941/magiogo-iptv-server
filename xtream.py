@@ -18,7 +18,7 @@ from flask import Blueprint, Response, current_app, request, send_file
 from werkzeug.exceptions import HTTPException, NotFound
 
 from client import IPTVException
-from dash_proxy import proxy_manifest
+from dash_proxy import proxy_hls_master, proxy_manifest
 from magiogo import ApiCooldownError, MagioGoException
 
 
@@ -285,7 +285,11 @@ def init_xtream(app, magio, storage_dir, context):
     @api.route('/timeshift/<username>/<password>/<duration>/<start>/<int:channel_id>.mpd')
     # AIOStreams Xtream builtin always requests catch-up as .ts; answer with the DASH manifest anyway.
     @api.route('/timeshift/<username>/<password>/<duration>/<start>/<int:channel_id>.ts')
-    def timeshift(username=None, password=None, duration=None, start=None, channel_id=None):
+    @api.route('/timeshift/<username>/<password>/<duration>/<start>/<int:channel_id>.m3u8', defaults={'hls': True}, methods=['GET', 'HEAD', 'OPTIONS'])
+    def timeshift(username=None, password=None, duration=None, start=None, channel_id=None, hls=False):
+        if request.method == 'OPTIONS':
+            from dash_proxy import apply_cors_headers
+            return apply_cors_headers(Response(status=204))
         try:
             start = dt.datetime.strptime(start or request.args.get('start', ''), '%Y-%m-%d:%H-%M').replace(tzinfo=dt.UTC).timestamp()
             minutes = int(duration or request.args.get('duration', '0'))
@@ -299,21 +303,23 @@ def init_xtream(app, magio, storage_dir, context):
         programme = next((p for p in service.programmes(channel) if int(p['start'] // 60) == int(start // 60)), None)
         # Stremio and AIOStreams ask for the programme on air as catch-up; there is none yet, so play live.
         if programme is not None and programme['start'] <= time.time() < programme['end']:
+            proxy_fn = proxy_hls_master if hls else proxy_manifest
             try:
-                return proxy_manifest(lambda: start_over_or_live(channel, programme), public_url(),
-                                      f"startover:{channel['id']}:{programme['schedule_id']}")
+                return proxy_fn(lambda: start_over_or_live(channel, programme), public_url(),
+                                f"startover:{channel['id']}:{programme['schedule_id']}")
             except HTTPException as error:
                 if error.code != 502:
                     raise
                 logging.getLogger(__name__).warning('Start-over manifest unavailable; playing live')
-                return proxy_manifest(lambda: magio.channel_stream_info(str(channel['id'])), public_url(),
-                                      str(channel['id']))
+                return proxy_fn(lambda: magio.channel_stream_info(str(channel['id'])), public_url(),
+                                str(channel['id']))
         if programme is None or not has_archive(channel, programme):
             return {'error': 'archive_unavailable'}, 404
         if abs(minutes - math.ceil((programme['end'] - programme['start']) / 60)) > 1:
             return {'error': 'programme_boundaries_required'}, 416
         schedule_id = programme['schedule_id']
-        return proxy_manifest(lambda: magio.programme_stream_info(schedule_id), public_url(), f"archive:{channel['id']}:{schedule_id}")
+        proxy_fn = proxy_hls_master if hls else proxy_manifest
+        return proxy_fn(lambda: magio.programme_stream_info(schedule_id), public_url(), f"archive:{channel['id']}:{schedule_id}")
 
     @api.route('/xmltv.php')
     def xmltv():
