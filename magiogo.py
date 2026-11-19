@@ -26,6 +26,7 @@ import datetime
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0'
 STREAM_PROFILE = 'p4'
+# Magio keeps 7 days of catch-up; the guide cache keeps the same days.
 GUIDE_ARCHIVE_DAYS = 7
 # Magio's 429 on stream-url clears within seconds although it asks for a minute.
 PLAYBACK_RATE_LIMIT_RETRY_SECONDS = 4
@@ -643,7 +644,7 @@ class MagioGo(IPTVClient):
         return programme
 
     def archive_days(self):
-        return 7
+        return GUIDE_ARCHIVE_DAYS
 
     def devices(self):
         # type: () -> List[MagioGoDevice]
