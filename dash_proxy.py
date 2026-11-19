@@ -183,21 +183,23 @@ def _scale_archive_timeline(template, namespace):
             template.set(name, template.get(name).replace('$Time$', '$Time$' + '0' * (len(str(factor)) - 1)))
 
 
-
 def _trim_live_timelines(root, namespace, max_seconds=45):
     """Keep live SegmentTimeline strictly under FFmpeg dashdec's 60s live-edge offset.
 
     FFmpeg's dashdec.c calculates the starting segment in n_timelines mode as
     (timeline_end - 60 * timescale). When video sums to exactly 60.000s while
     48kHz audio oscillates between 59.989s and 60.011s, FFmpeg picks segment 1
-    for video and segment 0 for audio (10s A/V skew). Trimming all timelines to
-    <= max_seconds guarantees every AdaptationSet starts on the same segment.
+    for video and segment 0 for audio (one segment of A/V skew). Trimming every
+    timeline to the same number of trailing segments, <= max_seconds, makes all
+    AdaptationSets start on the same segment when, as on Magio, the tracks share
+    segment boundaries.
     """
     tracks = []
     for template in root.findall('.//' + namespace + 'SegmentTemplate'):
         timescale_str = template.get('timescale')
         timeline = template.find(namespace + 'SegmentTimeline')
-        if not timescale_str or timeline is None:
+        # Rebuilt S elements keep only t and d, which $Number$ addressing would not survive.
+        if not timescale_str or timeline is None or '$Time$' not in template.get('media', ''):
             continue
         timescale = int(timescale_str)
         if timescale <= 0:

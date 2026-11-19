@@ -92,6 +92,15 @@ class LiveManifestTests(unittest.TestCase):
         self.assertEqual(windows['video'], 17950752563860000)
         self.assertEqual(windows['audio'], 86163609906976 + 480256 * 4 + 479232)
 
+    def test_live_timeline_addressed_by_number_is_not_trimmed(self):
+        content = '''<MPD type="dynamic"><Period>
+            <AdaptationSet contentType="video"><SegmentTemplate timescale="1000" startNumber="7" media="seg-$Number$.m4s">
+            <SegmentTimeline><S t="0" n="7" d="10000" r="5"/></SegmentTimeline>
+            </SegmentTemplate><Representation id="v"/></AdaptationSet></Period></MPD>'''
+        root = ET.fromstring(proxy._rewrite_manifest(content, 'https://cdn.test/live.mpd', 'https://proxy.test/seg/', []))
+        segments = root.findall('.//SegmentTimeline/S')
+        self.assertEqual([s.attrib for s in segments], [{'t': '0', 'n': '7', 'd': '10000', 'r': '5'}])
+
     def test_short_live_timeline_under_55s_is_not_trimmed(self):
         content = '''<MPD type="dynamic"><Period>
             <AdaptationSet contentType="video"><SegmentTemplate timescale="10000000" media="Fragments(video=$Time$)">
