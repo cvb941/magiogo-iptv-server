@@ -12,6 +12,7 @@ services:
             - MAGIO_PASSWORD=your_password
             - MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
             - MAGIO_GUIDE_DAYS=7
+            - MAGIO_GUIDE_PAST_DAYS=0
             - MAGIO_GUIDE_REFRESH_HOURS=12
             - MAGIO_DEVICE_TYPE=OTT_STB
             - MAGIO_DEVICE_NAME=Magio IPTV Server
