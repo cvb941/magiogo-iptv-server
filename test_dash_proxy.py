@@ -73,6 +73,36 @@ class LiveManifestTests(unittest.TestCase):
         self.assertEqual(windows, {})
 
 
+    def test_live_timeline_near_60s_is_trimmed_uniformly_and_preserves_live_window(self):
+        content = '''<MPD type="dynamic"><Period>
+            <AdaptationSet contentType="video"><SegmentTemplate timescale="10000000" media="Fragments(video=$Time$)">
+            <SegmentTimeline><S t="17950752063860000" d="100000000" r="5"/></SegmentTimeline>
+            </SegmentTemplate><Representation id="v"/></AdaptationSet>
+            <AdaptationSet contentType="audio"><SegmentTemplate timescale="48000" media="Fragments(audio=$Time$)">
+            <SegmentTimeline><S t="86163609906976" d="480256"/><S d="479232"/><S d="480256" r="2"/><S d="479232"/></SegmentTimeline>
+            </SegmentTemplate><Representation id="a"/></AdaptationSet></Period></MPD>'''
+        windows = {}
+        root = ET.fromstring(proxy._rewrite_manifest(content, 'https://cdn.test/live.mpd', 'https://proxy.test/seg/', [], windows))
+        video_s = root.findall('.//AdaptationSet[@contentType="video"]//SegmentTimeline/S')
+        audio_s = root.findall('.//AdaptationSet[@contentType="audio"]//SegmentTimeline/S')
+        self.assertEqual(len(video_s), 4)
+        self.assertEqual(len(audio_s), 4)
+        self.assertEqual(int(video_s[0].get('t')), 17950752263860000)
+        self.assertEqual(int(audio_s[0].get('t')), 86163609906976 + 480256 + 479232)
+        self.assertEqual(windows['video'], 17950752563860000)
+        self.assertEqual(windows['audio'], 86163609906976 + 480256 * 4 + 479232)
+
+    def test_short_live_timeline_under_55s_is_not_trimmed(self):
+        content = '''<MPD type="dynamic"><Period>
+            <AdaptationSet contentType="video"><SegmentTemplate timescale="10000000" media="Fragments(video=$Time$)">
+            <SegmentTimeline><S t="100000000" d="100000000" r="3"/></SegmentTimeline>
+            </SegmentTemplate><Representation id="v"/></AdaptationSet></Period></MPD>'''
+        root = ET.fromstring(proxy._rewrite_manifest(content, 'https://cdn.test/live.mpd', 'https://proxy.test/seg/', []))
+        video_s = root.findall('.//SegmentTimeline/S')
+        self.assertEqual(len(video_s), 1)
+        self.assertEqual(video_s[0].get('r'), '3')
+
+
 class DashProxyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
