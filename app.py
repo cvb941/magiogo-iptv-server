@@ -82,6 +82,7 @@ def status():
 
 
 @app.route('/channel/<channel_id>')
+@app.route('/channel/<channel_id>.mpd')
 def channel_redirect(channel_id):
     magio_iptv_server_public_url = os.environ.get('MAGIO_SERVER_PUBLIC_URL', "http://127.0.0.1:5000")
     return proxy_manifest(lambda: magio.channel_stream_info(channel_id), magio_iptv_server_public_url, channel_id)
@@ -108,12 +109,16 @@ def gzip_file(file_path):
 
 def generate_m3u8(channels):
     magio_iptv_server_public_url = os.environ.get('MAGIO_SERVER_PUBLIC_URL', "http://127.0.0.1:5000")
+    quality = os.environ.get('MAGIO_PLAYLIST_QUALITY', 'all').strip().lower()
+    suffix = '.mpd?quality=best' if quality == 'best' else ''
+    include_chno = os.environ.get('MAGIO_PLAYLIST_CHANNEL_NUMBERS', '').strip().lower() in ('1', 'true', 'yes')
     with open("public/magioPlaylist.m3u8.tmp", "w", encoding="utf-8") as text_file:
         text_file.write("#EXTM3U\n")
-        for channel in tqdm(channels, total=len(channels), desc="Generating .m3u8 playlist", unit="ch", file=sys.stdout):
+        for index, channel in enumerate(tqdm(channels, total=len(channels), desc="Generating .m3u8 playlist", unit="ch", file=sys.stdout), start=1):
+            chno = f' tvg-chno="{index}"' if include_chno else ''
             group = f' group-title="{channel.category}"' if channel.category else ''
-            text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}" tvg-logo="{channel.logo}"{group},{channel.name}\n')
-            text_file.write(f"{magio_iptv_server_public_url}/channel/{channel.id}\n")
+            text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}"{chno} tvg-logo="{channel.logo}"{group},{channel.name}\n')
+            text_file.write(f"{magio_iptv_server_public_url}/channel/{channel.id}{suffix}\n")
     os.replace("public/magioPlaylist.m3u8.tmp", "public/magioPlaylist.m3u8")
 
 
