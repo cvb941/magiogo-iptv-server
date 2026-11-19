@@ -52,14 +52,19 @@ class StartupTests(unittest.TestCase):
                         with patch.dict(os.environ, {'MAGIO_USERNAME': 'test', 'MAGIO_PASSWORD': 'test', 'MAGIO_GUIDE_REFRESH_HOURS': '12', 'MAGIO_QUALITY': 'REMOVED', 'MAGIO_DEVICE_TYPE': 'OTT_STB', 'MAGIO_DEVICE_NAME': 'Magio IPTV Server'}), patch('magiogo.MagioGo', return_value=client) as create_client, patch('atexit.register'):
                             module = importlib.import_module('app')
                         create_client.assert_called_once_with('./storage', 'test', 'test', device_type='OTT_STB', device_name='Magio IPTV Server',
-                                                              app_version=None)
+                                                              app_version=None, archive_days=7)
                         expected_context = hashlib.sha256(json.dumps(['test', 'OTT_STB', 'Magio IPTV Server', 'p4']).encode()).hexdigest()
                         self.assertEqual(module.xtream.context, expected_context)
                         self.assertEqual(module.app.extensions['dash_session_cache']['context'], expected_context)
                         now = datetime(2026, 1, 10, 12)
+                        with patch.dict(os.environ):
+                            os.environ.pop('MAGIO_GUIDE_PAST_DAYS', None)
+                            self.assertEqual(module.guide_past_days(), 7)
                         for past_days, expected in (('0', 0), ('3', 3), ('30', 7), ('-2', 0)):
-                            with patch.dict(os.environ, {'MAGIO_GUIDE_PAST_DAYS': past_days, 'MAGIO_GUIDE_DAYS': '2'}):
-                                self.assertEqual(module.guide_range(now), (now - timedelta(days=expected), now + timedelta(days=2)))
+                            with patch.dict(os.environ, {'MAGIO_GUIDE_PAST_DAYS': past_days}):
+                                self.assertEqual(module.guide_past_days(), expected)
+                        with patch.dict(os.environ, {'MAGIO_GUIDE_DAYS': '2'}):
+                            self.assertEqual(module.guide_range(now, 3), (now - timedelta(days=3), now + timedelta(days=2)))
                         if state == 'fresh':
                             client.channels.assert_not_called()
                             self.assertIsNotNone(module.last_refresh)
@@ -138,6 +143,16 @@ class AppVersionTests(unittest.TestCase):
             self.assertEqual(MagioGo(directory, 'test', 'test')._appVersion, '0.0.0')
             self.assertEqual(MagioGo(directory, 'test', 'test', device_type='OTT_ANDROID')._appVersion, '5.0.0')
             self.assertEqual(MagioGo(directory, 'test', 'test', device_type='OTT_ANDROID', app_version='5.1.0')._appVersion, '5.1.0')
+
+
+class ArchiveDaysTests(unittest.TestCase):
+    def test_archive_days_set_catch_up_and_guide_cache_reach(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(MagioGo(directory, 'test', 'test').archive_days(), 7)
+            client = MagioGo(directory, 'test', 'test', archive_days=3)
+            self.assertEqual(client.archive_days(), 3)
+            today = datetime.now(timezone.utc).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+            self.assertEqual(client._oldest_guide_day(), today - timedelta(days=5))
 
 
 class MagioRequestTests(unittest.TestCase):

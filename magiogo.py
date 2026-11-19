@@ -26,8 +26,8 @@ import datetime
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0'
 STREAM_PROFILE = 'p4'
-# Magio keeps 7 days of catch-up; the guide cache keeps the same days.
-GUIDE_ARCHIVE_DAYS = 7
+# Magio keeps 7 days of catch-up.
+MAGIO_ARCHIVE_DAYS = 7
 # Magio's 429 on stream-url clears within seconds although it asks for a minute.
 PLAYBACK_RATE_LIMIT_RETRY_SECONDS = 4
 
@@ -69,12 +69,14 @@ class MagioGoRecording:
 
 class MagioGo(IPTVClient):
 
-    def __init__(self, storage_dir, user_name, password, device_type='OTT_STB', device_name='Magio IPTV Server', app_version=None):
+    def __init__(self, storage_dir, user_name, password, device_type='OTT_STB', device_name='Magio IPTV Server', app_version=None,
+                 archive_days=MAGIO_ARCHIVE_DAYS):
         self._user_name = user_name
         self._password = password
         self._device = device_name
         self._deviceType = device_type
         self._appVersion = app_version or ('5.0.0' if self._deviceType == 'OTT_ANDROID' else '0.0.0')
+        self._archive_days = archive_days
         self._data = MagioGoSessionData()
         self.diagnostics = Diagnostics()
         self._auth_lock = threading.Lock()
@@ -422,7 +424,7 @@ class MagioGo(IPTVClient):
         days = int((to_date - from_date).days)
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
         self._epg_days = {day: cached for day, cached in self._epg_days.items()
-                          if day >= from_date - datetime.timedelta(days=GUIDE_ARCHIVE_DAYS + 1)}
+                          if day >= from_date - datetime.timedelta(days=self._archive_days + 1)}
 
         for n in range(days):
             progress((100 // days) * (n + 1))
@@ -469,7 +471,7 @@ class MagioGo(IPTVClient):
 
     def _oldest_guide_day(self):
         today = datetime.datetime.now(datetime.UTC).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
-        return today - datetime.timedelta(days=GUIDE_ARCHIVE_DAYS + 2)
+        return today - datetime.timedelta(days=self._archive_days + 2)
 
     def _load_guide_days(self):
         days = {}
@@ -644,7 +646,7 @@ class MagioGo(IPTVClient):
         return programme
 
     def archive_days(self):
-        return GUIDE_ARCHIVE_DAYS
+        return self._archive_days
 
     def devices(self):
         # type: () -> List[MagioGoDevice]

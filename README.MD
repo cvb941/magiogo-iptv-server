@@ -62,8 +62,8 @@ It should be a publicly (or privately) reachable URL from IPTV clients, to this 
 **MAGIO_GUIDE_DAYS** signifies how many days from today should be loaded
 into the XMLTV guide on refresh.
 
-**MAGIO_GUIDE_PAST_DAYS** signifies how many days before today should be included
-in the XMLTV guide on refresh (useful for catch-up thumbnails). The default is 0 and at most 7 days, the length of the Magio archive, are used.
+**MAGIO_GUIDE_PAST_DAYS** signifies how many days back catch-up is offered and included
+in the XMLTV guide on refresh (useful for catch-up thumbnails). The default is 7, the length of the Magio archive, which is also the maximum; 0 turns catch-up off.
 
 **MAGIO_GUIDE_REFRESH_HOURS** is the number of hours between the guide and channel playlist updates.
 
@@ -86,8 +86,8 @@ set MAGIO_PASSWORD=your_password
 set MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
 # optional, default is 7
 set MAGIO_GUIDE_DAYS=7
-# optional, default is 0
-set MAGIO_GUIDE_PAST_DAYS=0
+# optional, default is 7
+set MAGIO_GUIDE_PAST_DAYS=7
 # optional, default is 12
 set MAGIO_GUIDE_REFRESH_HOURS=12
 # optional, default is OTT_STB
@@ -102,7 +102,7 @@ flask run --host=0.0.0.0
 
 ### Docker
 ```shell script
-docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=your_password --env MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000 --env MAGIO_GUIDE_DAYS=7 --env MAGIO_GUIDE_PAST_DAYS=0 --env MAGIO_GUIDE_REFRESH_HOURS=12 --env MAGIO_DEVICE_TYPE=OTT_STB --env MAGIO_DEVICE_NAME="Magio IPTV Server" --name magiogo-iptv-server cvb941/magiogo-iptv-server
+docker run -p 5000:5000 --env MAGIO_USERNAME=your_username --env MAGIO_PASSWORD=your_password --env MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000 --env MAGIO_GUIDE_DAYS=7 --env MAGIO_GUIDE_PAST_DAYS=7 --env MAGIO_GUIDE_REFRESH_HOURS=12 --env MAGIO_DEVICE_TYPE=OTT_STB --env MAGIO_DEVICE_NAME="Magio IPTV Server" --name magiogo-iptv-server cvb941/magiogo-iptv-server
 ```
 
 ### Docker Compose
@@ -121,7 +121,7 @@ services:
             - MAGIO_PASSWORD=your_password
             - MAGIO_SERVER_PUBLIC_URL=http://127.0.0.1:5000
             - MAGIO_GUIDE_DAYS=7
-            - MAGIO_GUIDE_PAST_DAYS=0
+            - MAGIO_GUIDE_PAST_DAYS=7
             - MAGIO_GUIDE_REFRESH_HOURS=12
             - MAGIO_DEVICE_TYPE=OTT_STB
             - MAGIO_DEVICE_NAME=Magio IPTV Server

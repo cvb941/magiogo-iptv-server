@@ -117,15 +117,18 @@ def generate_m3u8(channels):
     os.replace("public/magioPlaylist.m3u8.tmp", "public/magioPlaylist.m3u8")
 
 
-def guide_range(now):
-    # Magio keeps no catch-up beyond its archive, so older guide days would only be refetched after every restart.
-    past_days = min(max(int(os.environ.get('MAGIO_GUIDE_PAST_DAYS', 0)), 0), GUIDE_ARCHIVE_DAYS)
+def guide_past_days():
+    # One setting covers catch-up, the guide cache and the XMLTV past days; Magio has nothing older to offer.
+    return min(max(int(os.environ.get('MAGIO_GUIDE_PAST_DAYS', MAGIO_ARCHIVE_DAYS)), 0), MAGIO_ARCHIVE_DAYS)
+
+
+def guide_range(now, past_days):
     return (now - datetime.timedelta(days=past_days),
             now + datetime.timedelta(days=int(os.environ.get('MAGIO_GUIDE_DAYS', 7))))
 
 
 def generate_xmltv(channels):
-    date_from, date_to = guide_range(datetime.datetime.now())
+    date_from, date_to = guide_range(datetime.datetime.now(), past_days)
     channel_ids = list(map(lambda c: c.id, channels))
     with tqdm(total=100, desc="Generating XMLTV guide", unit="pct", file=sys.stdout) as bar:
         last_progress = {'value': 0}
@@ -223,6 +226,8 @@ print(f"Device type configured to: {device_type}")
 device_name = os.environ.get('MAGIO_DEVICE_NAME', "Magio IPTV Server")
 print(f"Device name configured to: {device_name}")
 app_version = os.environ.get('MAGIO_APP_VERSION') or None
+past_days = guide_past_days()
+print(f"Past guide and catch-up days configured to: {past_days}")
 
 # Initial playlist and xmltv load
 magio_username = os.environ.get('MAGIO_USERNAME')
@@ -232,7 +237,7 @@ if missing_credentials:
     raise RuntimeError(f"Missing required environment variable(s): {', '.join(missing_credentials)}")
 
 magio = MagioGo("./storage", magio_username, magio_password, device_type=device_type, device_name=device_name,
-                app_version=app_version)
+                app_version=app_version, archive_days=past_days)
 magio.diagnostics = diagnostics
 cache_context = [magio_username, device_type, device_name, STREAM_PROFILE]
 xtream = init_xtream(app, magio, 'storage', cache_context)
