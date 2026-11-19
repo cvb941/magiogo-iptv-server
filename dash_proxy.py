@@ -183,12 +183,67 @@ def _scale_archive_timeline(template, namespace):
             template.set(name, template.get(name).replace('$Time$', '$Time$' + '0' * (len(str(factor)) - 1)))
 
 
+
+def _trim_live_timelines(root, namespace, max_seconds=45):
+    """Keep live SegmentTimeline strictly under FFmpeg dashdec's 60s live-edge offset.
+
+    FFmpeg's dashdec.c calculates the starting segment in n_timelines mode as
+    (timeline_end - 60 * timescale). When video sums to exactly 60.000s while
+    48kHz audio oscillates between 59.989s and 60.011s, FFmpeg picks segment 1
+    for video and segment 0 for audio (10s A/V skew). Trimming all timelines to
+    <= max_seconds guarantees every AdaptationSet starts on the same segment.
+    """
+    tracks = []
+    for template in root.findall('.//' + namespace + 'SegmentTemplate'):
+        timescale_str = template.get('timescale')
+        timeline = template.find(namespace + 'SegmentTimeline')
+        if not timescale_str or timeline is None:
+            continue
+        timescale = int(timescale_str)
+        if timescale <= 0:
+            continue
+        segs = []
+        cur = 0
+        for segment in timeline.findall(namespace + 'S'):
+            repeat = int(segment.get('r', 0))
+            if repeat < 0:
+                return
+            if 't' in segment.attrib:
+                cur = int(segment.get('t'))
+            duration = int(segment.get('d'))
+            for _ in range(repeat + 1):
+                segs.append((cur, duration))
+                cur += duration
+        if segs:
+            tracks.append((timeline, timescale, segs))
+    if not tracks:
+        return
+    if max(sum(d for _, d in segs) / ts for _, ts, segs in tracks) < 55:
+        return
+    min_len = min(len(segs) for _, _, segs in tracks)
+    keep = 2
+    for candidate in range(min_len, 1, -1):
+        if all(sum(d for _, d in segs[-candidate:]) / ts <= max_seconds for _, ts, segs in tracks):
+            keep = candidate
+            break
+    for timeline, _, segs in tracks:
+        trimmed = segs[-keep:]
+        for child in list(timeline):
+            timeline.remove(child)
+        for idx, (t, d) in enumerate(trimmed):
+            elem = ET.SubElement(timeline, namespace + 'S')
+            if idx == 0:
+                elem.set('t', str(t))
+            elem.set('d', str(d))
+
+
 def _rewrite_manifest(content, manifest_url, proxy_base, origins, live_windows=None, prefer_best=False):
     root = ET.fromstring(content)
     namespace = root.tag[:-3] if root.tag.endswith('}MPD') else ''
     if root.tag != namespace + 'MPD':
         raise ValueError('Expected an MPD')
     if root.get('type') == 'dynamic':
+        _trim_live_timelines(root, namespace)
         for adaptation in root.findall('.//' + namespace + 'AdaptationSet') if prefer_best else []:
             representations = adaptation.findall(namespace + 'Representation')
             if len(representations) > 1 and any(rep.get('height') for rep in representations):
@@ -381,7 +436,7 @@ def segment_proxy(sid, origin_id, subpath):
     fragment = re.search(r'/Fragments\(([^=]+)=(\d+)\)', subpath)
     if fragment and int(fragment[2]) > session_info.get('live_windows', {}).get(fragment[1], float('inf')):
         # DASH demuxers can request an unlisted future fragment and then replay it on reload.
-        time.sleep(.1)
+        time.sleep(.5)
         return Response(status=404, headers={'Retry-After': '1'})
     if request.query_string:
         target_url += '?' + request.query_string.decode('ascii')
