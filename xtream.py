@@ -29,6 +29,8 @@ class Xtream:
     def __init__(self, magio, storage_dir, context):
         self.magio = magio
         self.path = Path(storage_dir) / 'xtream.json'
+        # One file per channel: a refresh rewrites only its own channel's programmes, not every channel's.
+        self.epg_dir = Path(storage_dir) / 'xtream-epg'
         self.context = hashlib.sha256(json.dumps(context).encode()).hexdigest()
         self.lock = threading.RLock()
         self.channel_lock = threading.Lock()
@@ -36,8 +38,9 @@ class Xtream:
         self.data = {'context': self.context, 'channels': [], 'updated': 0, 'epg': {}}
         try:
             saved = json.loads(self.path.read_text(encoding='utf-8'))
-            if saved.get('context') == self.context and isinstance(saved.get('channels'), list) and isinstance(saved.get('epg'), dict):
-                self.data = saved
+            if saved.get('context') == self.context and isinstance(saved.get('channels'), list):
+                # Programmes saved inside this file by older versions are dropped and fetched again.
+                self.data = dict(saved, epg={})
         except (OSError, ValueError, TypeError, AttributeError):
             pass
 
@@ -46,15 +49,38 @@ class Xtream:
         return bool(os.environ.get('XTREAM_USERNAME') and os.environ.get('XTREAM_PASSWORD'))
 
     def save(self):
+        with self.lock:
+            text = json.dumps({key: value for key, value in self.data.items() if key != 'epg'})
+        self._write(self.path, text)
+
+    def _epg_path(self, key):
+        return self.epg_dir / (quote(key, safe='') + '.json')
+
+    def _cached_epg(self, key):
+        with self.lock:
+            cached = self.data['epg'].get(key)
+        if cached is None:
+            try:
+                saved = json.loads(self._epg_path(key).read_text(encoding='utf-8'))
+                if saved.get('context') != self.context or not isinstance(saved.get('programmes'), list):
+                    raise ValueError
+                cached = {k: saved[k] for k in ('at', 'retry_at', 'programmes') if k in saved}
+            except (OSError, ValueError, TypeError, AttributeError, KeyError):
+                return {}
+            with self.lock:
+                cached = self.data['epg'].setdefault(key, cached)
+        return cached
+
+    def _write(self, path, text):
         temporary = None
         try:
-            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=self.path.parent, delete=False) as file:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False) as file:
                 temporary = file.name
-                json.dump(self.data, file)
+                file.write(text)
                 file.flush()
                 os.fsync(file.fileno())
-            os.replace(temporary, self.path)
+            os.replace(temporary, path)
         except OSError as error:
             self.magio.diagnostics.record('cache_errors', error_type=type(error).__name__)
         finally:
@@ -95,7 +121,7 @@ class Xtream:
         with self.lock:
             lock = self.epg_locks.setdefault(key, threading.Lock())
         with lock:
-            cached = self.data['epg'].get(key, {})
+            cached = self._cached_epg(key)
             age = time.time() - cached.get('at', 0)
             if age > 15 * 60 and (time.time() >= cached.get('retry_at', 0) or age > 24 * 3600):
                 now = dt.datetime.now(dt.UTC)
@@ -124,7 +150,8 @@ class Xtream:
                 with self.lock:
                     self.data['epg'][key] = cached
                     self.data['epg'] = {k: v for k, v in self.data['epg'].items() if time.time() - v['at'] < 24 * 3600}
-                    self.save()
+                    text = json.dumps(dict(cached, context=self.context))
+                self._write(self._epg_path(key), text)
             for row in cached.get('programmes', []):
                 subtitle = (row.get('metadata') or {}).get('episode_title')
                 if subtitle:

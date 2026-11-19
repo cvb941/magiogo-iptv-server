@@ -143,6 +143,26 @@ class XtreamTests(unittest.TestCase):
         self.assertEqual(restored.programmes(restored.channel('4099')), self.service.programmes(self.service.channel('4099')))
         self.magio.channel_epg.assert_called_once()
 
+    def test_epg_refresh_writes_only_its_own_channel_file(self):
+        self.magio.channel_epg.return_value = [self.programme()]
+        self.api('get_simple_data_table', stream_id='4099')
+        self.assertNotIn('epg', json.loads(self.service.path.read_text()))
+        epg_file = Path(self.directory.name) / 'xtream-epg' / '4099.json'
+        self.assertEqual(len(json.loads(epg_file.read_text())['programmes']), 1)
+        if os.name == 'posix':
+            self.assertEqual(epg_file.stat().st_mode & 0o777, 0o600)
+        Xtream(self.magio, self.directory.name, ['different-account']).programmes(dict(id='4099', archive_days=7))
+        self.assertEqual(self.magio.channel_epg.call_count, 2)
+
+    def test_programmes_in_an_old_single_file_cache_are_dropped(self):
+        self.service.channel('4099')
+        old = json.loads(self.service.path.read_text())
+        old['epg'] = {'4099': {'at': time.time(), 'programmes': []}}
+        self.service.path.write_text(json.dumps(old))
+        restored = Xtream(self.magio, self.directory.name, self.context)
+        self.assertEqual(restored.data['epg'], {})
+        self.assertEqual(restored.channels(), self.service.channels())
+
     def test_short_epg_is_current_and_future_and_limits_are_validated(self):
         self.assertEqual(self.api('get_short_epg', stream_id='4099', limit='bad').status_code, 400)
         self.magio.channel_epg.assert_not_called()
