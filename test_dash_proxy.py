@@ -111,12 +111,18 @@ class LiveManifestTests(unittest.TestCase):
         self.assertEqual(len(video_s), 1)
         self.assertEqual(video_s[0].get('r'), '3')
 
-    def test_long_startover_dynamic_timeline_over_75s_becomes_static_vod(self):
-        content = '''<MPD type="dynamic" minimumUpdatePeriod="PT10S"><Period>
+    START_OVER = '''<MPD type="dynamic" minimumUpdatePeriod="PT10S"><Period>
             <AdaptationSet contentType="video"><SegmentTemplate timescale="10000000" media="Fragments(video=$Time$)">
             <SegmentTimeline><S t="100000000" d="100000000" r="19"/></SegmentTimeline>
             </SegmentTemplate><Representation id="v"/></AdaptationSet></Period></MPD>'''
-        root = ET.fromstring(proxy._rewrite_manifest(content, 'https://cdn.test/live.mpd', 'https://proxy.test/seg/', []))
+
+    def test_long_live_timeline_is_still_trimmed(self):
+        root = ET.fromstring(proxy._rewrite_manifest(self.START_OVER, 'https://cdn.test/live.mpd', 'https://proxy.test/seg/', []))
+        self.assertEqual(root.get('type'), 'dynamic')
+        self.assertEqual(len(root.findall('.//SegmentTimeline/S')), 4)
+
+    def test_start_over_becomes_static_vod(self):
+        root = ET.fromstring(proxy._rewrite_manifest(self.START_OVER, 'https://cdn.test/live.mpd', 'https://proxy.test/seg/', [], live=False))
         self.assertEqual(root.get('type'), 'static')
         self.assertEqual(root.get('mediaPresentationDuration'), 'PT200.000S')
         self.assertIsNone(root.get('minimumUpdatePeriod'))
@@ -567,6 +573,15 @@ class DashProxyTests(unittest.TestCase):
         self.assertEqual(self.segment_path(), path)
         self.assertEqual(self.requests[-1][1]['Cookie'], 'CDNAuth=ok')
         self.stream_info.assert_not_called()
+
+    def test_start_over_stays_static_after_restart(self):
+        type(self).manifest = LiveManifestTests.START_OVER
+        self.stream.live = False
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        self.assertEqual(self.manifest_root().get('type'), 'static')
+        self.stream_info.side_effect = requests.HTTPError('Magio API unavailable')
+        self.restart_cache()
+        self.assertEqual(self.manifest_root().get('type'), 'static')
 
     def test_cookie_domains_paths_security_and_expiration_survive_restart(self):
         proxy.init_session_cache(self.app, self.cache_path, self.cache_context)

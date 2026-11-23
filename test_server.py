@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import requests
@@ -73,6 +74,15 @@ class StartupTests(unittest.TestCase):
                             module.app.static_folder = str(Path('public').resolve())
                             with module.app.test_client().get('/magioGuide.xmltv') as response:
                                 self.assertEqual(response.data, b'cached')
+                            with patch.dict(os.environ, {'MAGIO_SERVER_PUBLIC_URL': 'http://server.test'}):
+                                module.generate_m3u8([SimpleNamespace(id='4598', logo='logo.png', category='', name='One')])
+                            playlist = ['#EXTM3U', '#EXTINF:-1 tvg-id="4598" tvg-chno="1" tvg-logo="logo.png",One',
+                                        'http://server.test/channel/4598.mpd']
+                            http = module.app.test_client()
+                            self.assertEqual(http.get('/magioPlaylist.m3u8').text.splitlines(), playlist)
+                            self.assertEqual(http.get('/magioPlaylist.m3u8?quality=best').text.splitlines(),
+                                             playlist[:2] + ['http://server.test/channel/4598.mpd?quality=best'])
+                            self.assertEqual(http.get('/magioPlaylist.m3u8?quality=low').status_code, 400)
                         else:
                             self.assertTrue(entered.wait(1))
                     finally:

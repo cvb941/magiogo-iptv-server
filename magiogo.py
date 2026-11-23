@@ -400,6 +400,7 @@ class MagioGo(IPTVClient):
         si.url = resp['url']
         si.manifest_type = 'mpd' if si.url.find('.mpd') > 0 else 'm3u'
         si.user_agent = UA
+        si.live = service == 'LIVE'
         return si
 
     @staticmethod
@@ -720,4 +721,5 @@ class MagioGo(IPTVClient):
         si.url = resp['url']
         si.manifest_type = 'mpd' if si.url.find('.mpd') > 0 else 'm3u'
         si.user_agent = UA
+        si.live = False
         return si

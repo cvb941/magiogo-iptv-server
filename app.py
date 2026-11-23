@@ -1,6 +1,7 @@
 import atexit
 import datetime
 import gzip
+import mimetypes
 import os
 import sys
 import time
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import xmltv
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, redirect, render_template
+from flask import Flask, Response, abort, redirect, render_template, request
 from tqdm import tqdm
 
 from dash_proxy import dash_proxy, init_session_cache, proxy_manifest, session_counts, _persist_sessions
@@ -88,6 +89,22 @@ def channel_redirect(channel_id):
     return proxy_manifest(lambda: magio.channel_stream_info(channel_id), magio_iptv_server_public_url, channel_id)
 
 
+@app.route('/magioPlaylist.m3u8')
+def playlist():
+    # Clients that only take a playlist URL (Jellyfin, Threadfin) pick the quality here for every channel.
+    quality = request.args.get('quality', 'all')
+    if quality not in ('all', 'best'):
+        return {'error': 'invalid_quality', 'supported': ['all', 'best']}, 400
+    if quality == 'all':
+        return app.send_static_file('magioPlaylist.m3u8')
+    try:
+        lines = (Path(app.static_folder) / 'magioPlaylist.m3u8').read_text(encoding='utf-8').splitlines()
+    except FileNotFoundError:
+        abort(404)
+    body = ''.join(line + ('' if not line or line.startswith('#') else '?quality=best') + '\n' for line in lines)
+    return Response(body, mimetype=mimetypes.guess_type('magioPlaylist.m3u8')[0])
+
+
 @app.errorhandler(ApiCooldownError)
 def api_cooldown(error):
     return {'error': 'upstream_unavailable', 'retry_after': error.retry_after}, 503, {
@@ -109,16 +126,13 @@ def gzip_file(file_path):
 
 def generate_m3u8(channels):
     magio_iptv_server_public_url = os.environ.get('MAGIO_SERVER_PUBLIC_URL', "http://127.0.0.1:5000")
-    quality = os.environ.get('MAGIO_PLAYLIST_QUALITY', 'all').strip().lower()
-    suffix = '.mpd?quality=best' if quality == 'best' else ''
-    include_chno = os.environ.get('MAGIO_PLAYLIST_CHANNEL_NUMBERS', '').strip().lower() in ('1', 'true', 'yes')
     with open("public/magioPlaylist.m3u8.tmp", "w", encoding="utf-8") as text_file:
         text_file.write("#EXTM3U\n")
         for index, channel in enumerate(tqdm(channels, total=len(channels), desc="Generating .m3u8 playlist", unit="ch", file=sys.stdout), start=1):
-            chno = f' tvg-chno="{index}"' if include_chno else ''
             group = f' group-title="{channel.category}"' if channel.category else ''
-            text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}"{chno} tvg-logo="{channel.logo}"{group},{channel.name}\n')
-            text_file.write(f"{magio_iptv_server_public_url}/channel/{channel.id}{suffix}\n")
+            text_file.write(f'#EXTINF:-1 tvg-id="{channel.id}" tvg-chno="{index}" tvg-logo="{channel.logo}"{group},{channel.name}\n')
+            # The .mpd extension lets M3U tuners such as Jellyfin's recognise DASH.
+            text_file.write(f"{magio_iptv_server_public_url}/channel/{channel.id}.mpd\n")
     os.replace("public/magioPlaylist.m3u8.tmp", "public/magioPlaylist.m3u8")
 
 

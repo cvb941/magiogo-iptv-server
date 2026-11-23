@@ -48,6 +48,10 @@ channel URL, e.g. `/channel/4598?quality=best`, to keep only the highest resolut
 and bitrate within each video group. Audio tracks are preserved; no transcoding
 is performed. `?quality=all` keeps all qualities. This option does not filter archives.
 
+Clients that only take a playlist URL, such as Jellyfin's M3U tuner or Threadfin, can
+request `/magioPlaylist.m3u8?quality=best` instead; every channel URL in that playlist
+then carries `?quality=best`.
+
 
 ## Setup instructions
 You can run this program either directly with Python 3.15

@@ -74,7 +74,7 @@ def init_session_cache(app, path, context):
                 'origins': entry['origins'], 'cookies': cookies,
                 'expires': now + min(remaining, SEGMENT_SESSION_TTL_SECONDS),
                 'manifest': b'', 'manifest_time': float('-inf'),
-                'live_windows': entry.get('live_windows', {}),
+                'live_windows': entry.get('live_windows', {}), 'live': bool(entry.get('live', True)),
             }
         channels = {(channel, public_url): sid for channel, public_url, sid in data['channels'] if sid in sessions}
         with SEGMENT_SESSIONS_LOCK:
@@ -104,7 +104,7 @@ def _persist_sessions(force=False):
             sessions = {
                 sid: {'manifest_url': entry['manifest_url'], 'user_agent': entry['user_agent'],
                       'origins': list(entry['origins']), 'cookies': [dict(cookie.__dict__) for cookie in entry['cookies']],
-                      'live_windows': entry.get('live_windows', {}),
+                      'live_windows': entry.get('live_windows', {}), 'live': entry.get('live', True),
                       'expires': wall + entry['expires'] - now}
                 for sid, entry in SEGMENT_SESSIONS.items()
                 if entry['expires'] + STALE_SESSION_RETENTION_SECONDS > now
@@ -183,17 +183,8 @@ def _scale_archive_timeline(template, namespace):
             template.set(name, template.get(name).replace('$Time$', '$Time$' + '0' * (len(str(factor)) - 1)))
 
 
-def _trim_live_timelines(root, namespace, max_seconds=45):
-    """Keep live SegmentTimeline strictly under FFmpeg dashdec's 60s live-edge offset.
-
-    FFmpeg's dashdec.c calculates the starting segment in n_timelines mode as
-    (timeline_end - 60 * timescale). When video sums to exactly 60.000s while
-    48kHz audio oscillates between 59.989s and 60.011s, FFmpeg picks segment 1
-    for video and segment 0 for audio (one segment of A/V skew). Trimming every
-    timeline to the same number of trailing segments, <= max_seconds, makes all
-    AdaptationSets start on the same segment when, as on Magio, the tracks share
-    segment boundaries.
-    """
+def _timeline_tracks(root, namespace):
+    """Expand each $Time$-addressed SegmentTimeline into (timeline, timescale, [(t, d), ...])."""
     tracks = []
     for template in root.findall('.//' + namespace + 'SegmentTemplate'):
         timescale_str = template.get('timescale')
@@ -209,7 +200,7 @@ def _trim_live_timelines(root, namespace, max_seconds=45):
         for segment in timeline.findall(namespace + 'S'):
             repeat = int(segment.get('r', 0))
             if repeat < 0:
-                return
+                return []
             if 't' in segment.attrib:
                 cur = int(segment.get('t'))
             duration = int(segment.get('d'))
@@ -218,17 +209,22 @@ def _trim_live_timelines(root, namespace, max_seconds=45):
                 cur += duration
         if segs:
             tracks.append((timeline, timescale, segs))
-    if not tracks:
-        return
-    max_duration = max(sum(d for _, d in segs) / ts for _, ts, segs in tracks)
-    if max_duration > 75:
-        root.set('type', 'static')
-        for attr in ('minimumUpdatePeriod', 'timeShiftBufferDepth', 'publishTime', 'suggestedPresentationDelay'):
-            root.attrib.pop(attr, None)
-        if not root.get('mediaPresentationDuration'):
-            root.set('mediaPresentationDuration', f'PT{max_duration:.3f}S')
-        return
-    if max_duration < 55:
+    return tracks
+
+
+def _trim_live_timelines(root, namespace, max_seconds=45):
+    """Keep live SegmentTimeline strictly under FFmpeg dashdec's 60s live-edge offset.
+
+    FFmpeg's dashdec.c calculates the starting segment in n_timelines mode as
+    (timeline_end - 60 * timescale). When video sums to exactly 60.000s while
+    48kHz audio oscillates between 59.989s and 60.011s, FFmpeg picks segment 1
+    for video and segment 0 for audio (one segment of A/V skew). Trimming every
+    timeline to the same number of trailing segments, <= max_seconds, makes all
+    AdaptationSets start on the same segment when, as on Magio, the tracks share
+    segment boundaries.
+    """
+    tracks = _timeline_tracks(root, namespace)
+    if not tracks or max(sum(d for _, d in segs) / ts for _, ts, segs in tracks) < 55:
         return
     min_len = min(len(segs) for _, _, segs in tracks)
     keep = 2
@@ -247,13 +243,26 @@ def _trim_live_timelines(root, namespace, max_seconds=45):
             elem.set('d', str(d))
 
 
-def _rewrite_manifest(content, manifest_url, proxy_base, origins, live_windows=None, prefer_best=False):
+def _start_over_as_recording(root, namespace):
+    """Serve start-over as VOD: FFmpeg plays a dynamic MPD from its live edge, not the programme start."""
+    tracks = _timeline_tracks(root, namespace)
+    if not tracks:
+        return
+    root.set('type', 'static')
+    for attr in ('minimumUpdatePeriod', 'timeShiftBufferDepth', 'publishTime', 'suggestedPresentationDelay'):
+        root.attrib.pop(attr, None)
+    if not root.get('mediaPresentationDuration'):
+        root.set('mediaPresentationDuration', f'PT{max(sum(d for _, d in segs) / ts for _, ts, segs in tracks):.3f}S')
+
+
+def _rewrite_manifest(content, manifest_url, proxy_base, origins, live_windows=None, prefer_best=False, live=True):
     root = ET.fromstring(content)
     namespace = root.tag[:-3] if root.tag.endswith('}MPD') else ''
     if root.tag != namespace + 'MPD':
         raise ValueError('Expected an MPD')
     if root.get('type') == 'dynamic':
-        _trim_live_timelines(root, namespace)
+        # Magio serves start-over as a dynamic ARCHIVE manifest spanning the whole programme so far.
+        (_trim_live_timelines if live else _start_over_as_recording)(root, namespace)
         for adaptation in root.findall('.//' + namespace + 'AdaptationSet') if prefer_best else []:
             representations = adaptation.findall(namespace + 'Representation')
             if len(representations) > 1 and any(rep.get('height') for rep in representations):
@@ -370,13 +379,13 @@ def _fetch_manifest(stream_info, public_url, key, prefer_best=False):
                 return Response(cached['manifest'], mimetype='application/dash+xml')
 
     if cached:
-        url, user_agent = cached['manifest_url'], cached['user_agent']
+        url, user_agent, live = cached['manifest_url'], cached['user_agent'], cached.get('live', True)
         origins = list(cached['origins'])
     else:
         stream_info = stream_info() if callable(stream_info) else stream_info
         if stream_info.manifest_type != 'mpd':
             return redirect(stream_info.url, code=303)
-        url, user_agent = stream_info.url, stream_info.user_agent
+        url, user_agent, live = stream_info.url, stream_info.user_agent, getattr(stream_info, 'live', True)
         sid, origins = uuid.uuid4().hex, []
 
     try:
@@ -388,7 +397,7 @@ def _fetch_manifest(stream_info, public_url, key, prefer_best=False):
                 live_windows = {}
                 manifest = _rewrite_manifest(
                     upstream.content, upstream.url,
-                    f'{public_url.rstrip("/")}/segproxy/{sid}/', origins, live_windows, prefer_best,
+                    f'{public_url.rstrip("/")}/segproxy/{sid}/', origins, live_windows, prefer_best, live,
                 )
                 cookies = session.cookies.copy()
                 manifest_url = upstream.url
@@ -418,7 +427,7 @@ def _fetch_manifest(stream_info, public_url, key, prefer_best=False):
             'origins': origins, 'cookies': cookies, 'user_agent': user_agent,
             'expires': now + SEGMENT_SESSION_TTL_SECONDS,
             'manifest_url': manifest_url, 'manifest': manifest, 'manifest_time': now,
-            'live_windows': live_windows,
+            'live_windows': live_windows, 'live': live,
         }
         if key is not None:
             CHANNEL_SESSIONS[key] = sid

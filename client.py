@@ -65,6 +65,7 @@ class StreamInfo(Base):
         self.max_bandwidth = None
         self.user_agent = ''
         self.headers = {}
+        self.live = True  # dynamic manifests of a live service get trimmed; ARCHIVE/DVR ones are whole programmes
 
 
 class Programme(Base):
