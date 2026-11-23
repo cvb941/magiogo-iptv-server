@@ -1,6 +1,8 @@
 import threading
 import json
 import os
+import re
+import struct
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import unittest
@@ -16,6 +18,17 @@ from flask import Flask, redirect
 
 import dash_proxy as proxy
 from diagnostics import Diagnostics
+
+
+def moof(base_media_decode_time):
+    """A moof box whose single traf carries a version 1 tfdt."""
+    tfdt = struct.pack('>I4sB3sQ', 20, b'tfdt', 1, b'\0\0\0', base_media_decode_time)
+    traf = struct.pack('>I4s', 8 + len(tfdt), b'traf') + tfdt
+    return struct.pack('>I4s', 8 + len(traf), b'moof') + traf
+
+
+def tfdt_of(segment):
+    return struct.unpack('>Q', segment[28:36])[0]
 
 
 class ArchiveTimelineTests(unittest.TestCase):
@@ -164,6 +177,9 @@ class DashProxyTests(unittest.TestCase):
                     status, body, headers = 404, b'', {}
                 elif self.headers.get('Cookie') != 'CDNAuth=ok':
                     status, body, headers = 403, b'', {}
+                elif self.path.startswith('/live/hls/'):
+                    status, headers = 200, {'Content-Type': 'video/mp4'}
+                    body = moof(int(self.path.split('_')[1].split('.')[0])) + b'mdat-payload'
                 elif self.headers.get('Range') == 'bytes=2-5':
                     status, body = 206, b'2345'
                     headers = {'Content-Type': 'video/mp4', 'Content-Range': 'bytes 2-5/10', 'Accept-Ranges': 'bytes', 'ETag': '"segment"'}
@@ -206,6 +222,7 @@ class DashProxyTests(unittest.TestCase):
         proxy.SEGMENT_SESSIONS.clear()
         proxy.CHANNEL_SESSIONS.clear()
         proxy.CHANNEL_LOCKS.clear()
+        proxy.HLS_CACHE.clear()
         self.now = 1000
         self.wall = 1700000000
         clock = patch.object(proxy, 'time', SimpleNamespace(monotonic=lambda: self.now, time=lambda: self.wall))
@@ -217,6 +234,7 @@ class DashProxyTests(unittest.TestCase):
         self.app.extensions['diagnostics'] = Diagnostics()
         self.app.register_blueprint(proxy.dash_proxy)
         self.app.add_url_rule('/channel/<channel>', view_func=lambda channel: proxy.proxy_manifest(self.stream_info, 'http://proxy.test/', channel))
+        self.app.add_url_rule('/hls-master/<channel>', 'hls_master', view_func=lambda channel: proxy.proxy_hls_master(self.stream_info, 'http://proxy.test/', channel))
         self.app.register_error_handler(404, lambda error: redirect('/'))
         self.client = self.app.test_client()
         self.directory = tempfile.TemporaryDirectory()
@@ -717,6 +735,83 @@ class DashProxyTests(unittest.TestCase):
         self.assertEqual(snapshot['counters']['cdn_errors'], 2)
         self.assertEqual(snapshot['last']['cdn_errors']['error_type'], 'ChunkedEncodingError')
 
+    def hls_manifest(self, video_start, audio_start, kind='dynamic'):
+        # Audio starts half a second after video, as epoch-based Magio timelines may.
+        type(self).manifest = f'''<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="{kind}"><Period>
+            <AdaptationSet contentType="video"><Representation id="v" bandwidth="5000000" codecs="avc1">
+            <SegmentTemplate timescale="10000000" initialization="hls/init_v.mp4" media="hls/v_$Time$.m4s?token=a%20b%2B">
+            <SegmentTimeline><S t="{video_start}" d="40000000" r="2"/></SegmentTimeline></SegmentTemplate>
+            </Representation></AdaptationSet>
+            <AdaptationSet contentType="audio" lang="slk"><Representation id="a" bandwidth="128000" codecs="mp4a.40.2">
+            <SegmentTemplate timescale="48000" initialization="hls/init_a.mp4" media="hls/a_$Time$.m4s">
+            <SegmentTimeline><S t="{audio_start}" d="192000" r="2"/></SegmentTimeline></SegmentTemplate>
+            </Representation></AdaptationSet></Period></MPD>'''
+
+    def hls_playlist(self, kind):
+        response = self.client.get('/hls-master/1')
+        self.assertEqual(response.status_code, 200)
+        path = urlsplit(re.search(rf'http://\S+/{kind}/0\.m3u8', response.data.decode())[0]).path
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200)
+        return response.data.decode().splitlines()
+
+    VIDEO_START = 17000000000000000
+    AUDIO_START = 17000000005000000 * 48000 // 10000000
+
+    def test_hls_live_window_keeps_counting_with_one_t0_for_all_tracks(self):
+        self.hls_manifest(self.VIDEO_START, self.AUDIO_START)
+        video, audio = self.hls_playlist('video'), self.hls_playlist('audio')
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:0', video)
+        self.assertFalse(any(line.startswith(('#EXT-X-PLAYLIST-TYPE', '#EXT-X-START')) for line in video))
+        t0s = {line.split('_hls_t0=')[1].split('&')[0] for line in video + audio if '_hls_t0=' in line}
+        self.assertEqual(t0s, {'1700000000.0'})
+
+        self.hls_manifest(self.VIDEO_START + 40000000, self.AUDIO_START + 192000)
+        self.now += proxy.HLS_REFRESH_SECONDS
+        video = self.hls_playlist('video')
+        self.assertIn('#EXT-X-MEDIA-SEQUENCE:1', video)
+        self.assertIn('_hls_t0=1700000000.0&', next(line for line in video if 'v_' in line))
+
+    def test_hls_start_over_is_an_event_from_the_programme_start(self):
+        self.stream.live = False
+        self.hls_manifest(self.VIDEO_START, self.AUDIO_START)
+        video = self.hls_playlist('video')
+        self.assertIn('#EXT-X-PLAYLIST-TYPE:EVENT', video)
+        self.assertIn('#EXT-X-START:TIME-OFFSET=0.0', video)
+        self.assertNotIn('#EXT-X-ENDLIST', video)
+
+        self.hls_manifest(self.VIDEO_START, self.AUDIO_START, 'static')
+        self.now += proxy.HLS_REFRESH_SECONDS
+        video = self.hls_playlist('video')
+        self.assertIn('#EXT-X-PLAYLIST-TYPE:EVENT', video)
+        self.assertEqual(video[-1], '#EXT-X-ENDLIST')
+
+    def test_hls_segments_are_rebased_together_and_keep_cdn_queries_verbatim(self):
+        self.hls_manifest(self.VIDEO_START, self.AUDIO_START)
+        lines = {kind: self.hls_playlist(kind) for kind in ('video', 'audio')}
+        video = self.client.get(next(line for line in lines['video'] if 'v_' in line)).get_data()
+        audio = self.client.get(next(line for line in lines['audio'] if 'a_' in line)).get_data()
+        self.assertEqual(tfdt_of(video), 0)
+        self.assertEqual(tfdt_of(audio), 24000)  # 0.5 s at 48 kHz
+        self.assertTrue(video.endswith(b'mdat-payload'))
+        self.assertIn(f'/live/hls/v_{self.VIDEO_START}.m4s?token=a%20b%2B', [path for path, _ in self.requests])
+
+    def test_hls_session_survives_restart(self):
+        self.stream.live = False
+        self.hls_manifest(self.VIDEO_START, self.AUDIO_START)
+        video = self.hls_playlist('video')
+        proxy.init_session_cache(self.app, self.cache_path, self.cache_context)
+        with self.app.app_context():
+            proxy._persist_sessions(force=True)
+        self.restart_cache()
+        proxy.HLS_CACHE.clear()
+        path = urlsplit(next(line for line in video if 'v_' in line)).path
+        sid = path.split('/')[2]
+        with self.app.test_request_context():
+            response = proxy.hls_media_playlist(sid, 'video', 0)
+        self.assertIn(b'#EXT-X-PLAYLIST-TYPE:EVENT', response.data)
+        self.assertIn(b'http://proxy.test/segproxy/', response.data)
+
 
 class HlsChasePlayTests(unittest.TestCase):
     def test_hls_event_chase_play_and_tfdt_rebase(self):
@@ -747,7 +842,7 @@ class HlsChasePlayTests(unittest.TestCase):
   </Period>
 </MPD>"""
         origins = []
-        tracks, is_dynamic = dash_proxy._parse_hls_tracks(mpd, 'https://cdn.example.com/index.mpd', 'http://local:5050/segproxy/sid1/', origins)
+        tracks, is_dynamic, _ = dash_proxy._parse_hls_tracks(mpd, 'https://cdn.example.com/index.mpd', 'http://local:5050/segproxy/sid1/', origins)
         self.assertTrue(is_dynamic)
         self.assertEqual(len(tracks['video']), 1)
         self.assertEqual(len(tracks['audio']), 1)
